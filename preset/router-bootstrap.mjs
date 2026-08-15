@@ -20,8 +20,8 @@
  */
 
 import {
-  applyPersona, bandFor, coreFor, parseMode, personaFor, sessionMode, testinessFor, clamp01,
-  isComplexTask,
+  applyPersona, bandFor, bandOf, coreFor, parseMode, personaFor, sessionMode, testinessFor,
+  clamp01, extractText, isComplexTask,
 } from './router-core.mjs'
 
 /** Cordis plugin name used by loader diagnostics. */
