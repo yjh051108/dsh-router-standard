@@ -131,18 +131,24 @@ test('applyPersona tolerates missing sections', () => {
 test('preset.yml metadata stays YAML-safe (no unquoted ": " in plain scalars)', () => {
   // dsh reads preset.yml with a YAML loader; an unquoted plain scalar containing
   // ": " (e.g. "restoration: one-sentence") fails to parse and the preset picker
-  // falls back to the id — keep such description values double-quoted.
+  // falls back to the id — keep such values quoted, and close any opened quote.
   const presetRoot = join(import.meta.dirname, 'preset')
   for (const entry of readdirSync(presetRoot, { withFileTypes: true })) {
     if (!entry.isDirectory()) continue
     const file = join(presetRoot, entry.name, 'preset.yml')
-    const descLine = readFileSync(file, 'utf8').split(/\r?\n/).find((l) => l.startsWith('description:'))
-    assert.ok(descLine, `${entry.name}/preset.yml must carry a description line`)
-    const value = descLine.slice('description:'.length).trim()
-    if (value.startsWith('"')) {
-      assert.ok(value.endsWith('"'), `${entry.name} quoted description must close the quote`)
-    } else {
-      assert.ok(!value.includes(': '), `${entry.name} unquoted description must not contain ": "`)
+    const lines = readFileSync(file, 'utf8').split(/\r?\n/)
+    assert.ok(lines.some((l) => l.startsWith('name:')), `${entry.name}/preset.yml must carry a name line`)
+    assert.ok(lines.some((l) => l.startsWith('description:')), `${entry.name}/preset.yml must carry a description line`)
+    for (const line of lines) {
+      const match = line.match(/^([A-Za-z][A-Za-z0-9_-]*):\s*(.+)$/)
+      if (match === null) continue
+      const [, key, value] = match
+      if (value.startsWith('"') || value.startsWith("'")) {
+        const close = value[0]
+        assert.ok(value.endsWith(close), `${entry.name} ${key} value opens ${close} but never closes it`)
+      } else {
+        assert.ok(!value.includes(': '), `${entry.name} unquoted ${key} value must not contain ": "`)
+      }
     }
   }
 })
