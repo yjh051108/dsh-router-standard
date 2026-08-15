@@ -148,6 +148,10 @@ export function apply(ctx, config) {
       if (message?.source?.kind !== 'user') return // only real user messages
       const session = agent?.session
       if (session === undefined || agent?.inbox === undefined) return
+      // Spawned/forked child sessions (header.parentSession set) are clean
+      // scoped tasks (e.g. a child restricted to memory tools) — the router
+      // governs root user sessions only (same semantics as PR #5).
+      if (session.header?.parentSession !== undefined) return
       const text = extractText(message)
       if (!firstUserText.has(session.id) && text.trim()) {
         firstUserText.set(session.id, text.trim()) // issue #3: capture BEFORE assembly
