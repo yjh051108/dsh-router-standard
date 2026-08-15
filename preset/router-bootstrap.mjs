@@ -52,6 +52,12 @@ export function apply(ctx, config) {
     const assembled = await next()
     const agent = context.agent
     if (agent === undefined) return assembled
+    // Spawned subagents are clean child tasks with their own scoped tool sets
+    // (e.g. a child restricted to memory tools has no shell); the router
+    // governs root (user) sessions only, so let children pass through
+    // untouched. Previously a shell-less child crashed every one of its turns
+    // with "no platform shell in catalog".
+    if (agent.session?.header?.parentSession !== undefined) return assembled
     const session = agent.session
     agents.set(session.id, agent)
 
