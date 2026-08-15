@@ -21,7 +21,7 @@
 
 import {
   applyPersona, bandFor, coreFor, parseMode, personaFor, sessionMode, testinessFor, clamp01,
-  isComplexTask,
+  isComplexTask, extractText,
 } from './router-core.mjs'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -133,29 +133,39 @@ export function apply(ctx, config) {
   const GUIDE_DEEP =
     '\nRouter: classify this task (build or fix) now, then adopt the matching style — build: direct production; fix: inspect-first. Think deeply about the architecture, edge cases, and integration points. Do not spend reasoning on the environment or tooling. Produce when your information is complete. End each reasoning block with a decision or an information need.'
 
-  ctx.on('session/event', (session, event) => {
-    if (event.type !== 'user/message') return
-    const data = event.data ?? {}
-    if (data.source?.kind !== 'user') return // only real user messages
-    const text = extractText(data)
-    if (!firstUserText.has(session.id) && text.trim()) {
-      firstUserText.set(session.id, text.trim()) // issue #3: capture BEFORE assembly
-    }
-    const agent = ctx.get('agent')
-    const target = agent !== undefined && agent.session === session ? agent : [...agents.values()].find((a) => a.session === session)
-    if (target === undefined || target.inbox === undefined) return
-    const mode = overrides.get(session.id) ?? firstUserText.get(session.id) ?? sessionMode(session)
-    if (bandOf(mode) !== 'weak') return // strong modes need no guidance
-    if (!text.trim()) return
-    const guide = isComplexTask(text) ? GUIDE_DEEP : GUIDE_WEAK
-    try {
-      target.inbox.append('next-step', {
-        id: `router-guide-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        role: 'user',
-        source: { kind: 'plugin', plugin: 'router-bootstrap' },
-        content: [{ type: 'text', text: guide }],
-      })
-    } catch { /* duplicate/ordering races: skip */ }
+  // rc.6 compat (measured): preset listeners registered on the standing scope
+  // never receive `session/event` / `agent/*` emits — the events dispatcher
+  // resolves listeners from the ROOT `_hooks` table only, while a preset's
+  // `ctx.on(...)` registers on its own fiber's hooks table (disjoint sets;
+  // scopeTarget filtering does not bridge that). `ctx.root.on(...)` does
+  // receive them: `agent/inbox/inserted` carries `{ message, agent }` with the
+  // agent's session and inbox attached. Lifecycle is managed with ctx.effect
+  // so unloading the preset disposes the listener.
+  ctx.effect(() => {
+    const disposers = []
+    disposers.push(ctx.root.on('agent/inbox/inserted', (payload) => {
+      const { message, agent } = payload ?? {}
+      if (message?.source?.kind !== 'user') return // only real user messages
+      const session = agent?.session
+      if (session === undefined || agent?.inbox === undefined) return
+      const text = extractText(message)
+      if (!firstUserText.has(session.id) && text.trim()) {
+        firstUserText.set(session.id, text.trim()) // issue #3: capture BEFORE assembly
+      }
+      const mode = overrides.get(session.id) ?? sessionMode(session)
+      if (bandFor(mode) !== 'weak') return // strong modes need no guidance
+      if (!text.trim()) return
+      const guide = isComplexTask(text) ? GUIDE_DEEP : GUIDE_WEAK
+      try {
+        agent.inbox.append('next-step', {
+          id: `router-guide-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          role: 'user',
+          source: { kind: 'plugin', plugin: 'router-bootstrap' },
+          content: [{ type: 'text', text: guide }],
+        })
+      } catch { /* duplicate/ordering races: skip */ }
+    }))
+    return () => { for (const dispose of disposers) { try { dispose() } catch {} } }
   })
 
   // ── router visibility & tuning (agent self-optimization) ────────────────
