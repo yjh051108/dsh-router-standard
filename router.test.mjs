@@ -125,3 +125,48 @@ test('applyPersona tolerates missing sections', () => {
   const out = applyPersona([], 'p')
   assert.deepEqual(out, [{ name: 'router-persona', text: 'p', order: 0 }])
 })
+
+// ── router-bootstrap 插件本体回归（weak 引导路径） ────────────────────────
+// 回归背景：v0.1.1 的 import 列表漏掉 bandOf，session/event 处理器在
+// L107 调用它 → 有活跃 agent 时每条真实用户消息都抛 ReferenceError，
+// weak 近距离引导（P14-P20）完全不工作。以下测试直接挂载插件本体。
+import { apply as applyBootstrap } from './preset/router-bootstrap.mjs'
+
+/** 最小 cordis ctx mock：只实现插件用到的方法。 */
+function makeCtx() {
+  const handlers = {}
+  return {
+    handlers,
+    on: (event, fn) => { (handlers[event] ??= []).push(fn) },
+    get: () => undefined,
+    effect: (fn) => fn(),
+    tools: { register: () => {} },
+    llm: {},
+    logger: { warn: () => {} },
+  }
+}
+
+function userMessageEvent(text) {
+  return { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text }] } }
+}
+
+test('weak-mode user message appends guidance without throwing (bandOf import)', async () => {
+  const ctx = makeCtx()
+  applyBootstrap(ctx, {})
+  const session = { id: 's-weak', events: [userMessageEvent('随便聊聊今天的情况')] } // 无关键词 → weak
+  const inbox = []
+  ctx.get = () => ({ session, inbox: { append: (_queue, msg) => inbox.push(msg) } })
+  for (const fn of ctx.handlers['session/event']) await fn(session, session.events[0])
+  assert.equal(inbox.length, 1, 'weak message must append exactly one guidance message')
+  assert.match(inbox[0].content[0].text, /Router: classify this task/)
+})
+
+test('strong-mode user message skips guidance without throwing (bandOf import)', async () => {
+  const ctx = makeCtx()
+  applyBootstrap(ctx, {})
+  const session = { id: 's-spec', events: [userMessageEvent('修复这个仓库里的 bug')] } // spec → 不该有引导
+  const inbox = []
+  ctx.get = () => ({ session, inbox: { append: (_queue, msg) => inbox.push(msg) } })
+  for (const fn of ctx.handlers['session/event']) await fn(session, session.events[0])
+  assert.equal(inbox.length, 0, 'strong modes need no guidance')
+})
