@@ -17,3 +17,23 @@ This project builds on the DeepSeek Harness ecosystem and on prior open work:
 
 DeepSeek is a trademark of its respective owner. This project is a community
 artifact and is not endorsed by DeepSeek.
+
+
+Fork notice (huozhetiaozhehuopopo/dsh-router-standard)
+------------------------------------------------------
+
+This repository is a FORK of https://github.com/yjh051108/dsh-router-standard
+(upstream v0.2.0, commit f9667f7). Fork-specific changes are maintained on the
+`fix/extracttext-import` branch (and released as v0.2.1 / v0.2.2):
+
+- v0.2.1 — five original fixes (extractText import, firstUserText type
+  unification via currentMode(), assembly-chain v1, near-field guidance
+  reenter deadlock, test repair). Tests: 17/17.
+- v0.2.2 — absorbs upstream PRs #17/#21/#5 (claimed-event first-turn routing,
+  sessionMode source-kind filter, session-selected model, subagent pass-through).
+  Tests: 23/23. Details: CHANGELOG.md, README "Fork 版本说明".
+
+Every commit / pull request / release produced by the DSH agent carries a
+generation signature at the end of its description:
+「（由 DSH 生成：model=… · router-mode=… · harness=… · preset=…）」.
+Commits before 2026-08-17 predate that convention (see CHANGELOG).

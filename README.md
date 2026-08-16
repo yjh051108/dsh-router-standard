@@ -158,7 +158,8 @@ keywords):
 ## Tests
 
 ```sh
-node --test router.test.mjs   # 11 tests: classification, bands, personas, plan-section survival
+node --test router.test.mjs   # 23 tests: classification, bands, personas, plan-section survival,
+                                  #        assembly smoke (v1+v2), absorbed-PR regressions (#17/#21/#5)
 ```
 
 ## Files
