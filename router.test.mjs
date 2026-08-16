@@ -188,3 +188,92 @@ function runSmoke(bootstrapNs) {
 
 test('bootstrap v1 (mounted by agent.cordis.yml) listener survives user messages', runSmoke(bootstrapV1))
 test('bootstrap v2 (ships alongside) listener survives user messages', runSmoke(bootstrapV2))
+
+// ── absorbed upstream fixes: regression suite (PR #17 / #21 / #5) ─────────
+// Each test is written against the CURRENT code first; it must FAIL before
+// the fix is absorbed (proving the bug reproduces) and PASS after.
+
+// T1: sessionMode must skip plugin-injected messages (PR #17.2)
+test('sessionMode ignores plugin-injected user/message events (PR #17)', () => {
+  const plugin = { type: 'user/message', data: { source: { kind: 'plugin' }, content: [{ type: 'text', text: '技能目录注入：开发 12 个工具，构建 3 个新项目' }] } }
+  const user = { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '修复这个仓库里的 bug' }] } }
+  assert.equal(sessionMode({ events: [plugin, user] }), 0, 'must classify the real user message, not the plugin text')
+  assert.equal(sessionMode({ events: [plugin] }), 'weak', 'plugin-only transcript → weak')
+})
+
+// T2: agent/inbox/claimed captures the first real user text BEFORE assemble (PR #17.1)
+function claimedHarness(config = {}) {
+  const listeners = {}
+  const ctx = {
+    on(event, cb) { listeners[event] = cb },
+    get(key) { if (key === 'llm') return { stream: async function* () {} }; return undefined },
+    effect(fn) { fn() },
+    tools: { register() {} },
+  }
+  bootstrapV1.apply(ctx, config)
+  return { ctx, listeners }
+}
+
+test('claimed first-user text routes the FIRST assembly (PR #17.1)', async () => {
+  const h = claimedHarness({ routerMode: 'spec' })
+  const listeners = h.listeners
+  const session = { id: 's-claimed', events: [] }
+  const agent = { session, options: { provider: 'p', model: 'deepseek-v4-flash' } }
+  assert.ok(listeners['agent/inbox/claimed'], 'claimed listener must be registered')
+  listeners['agent/inbox/claimed']({ agent, message: { source: { kind: 'user' }, content: [{ type: 'text', text: '帮我开发一个马里奥网页小游戏' }] } })
+  const out = await listeners['system-prompt/assemble'](
+    {}, { agent },
+    async () => ({ sections: [{ name: 'persona', text: 'x' }], tools: [{ name: 'bash' }], variables: { provider: 'p', model: 'deepseek-v4-flash' } }),
+  )
+  const persona = out.sections.find((s) => s.name === 'router-persona').text
+  assert.ok(persona.includes('hands-on'), 'react task must get the react persona on the FIRST assembly')
+})
+
+test('claimed ignores plugin-injected messages (PR #17.1)', async () => {
+  const h = claimedHarness({ routerMode: 'spec' })
+  const session = { id: 's-claimed2', events: [] }
+  const agent = { session, options: { provider: 'p', model: 'deepseek-v4-flash' } }
+  h.listeners['agent/inbox/claimed']({ agent, message: { source: { kind: 'plugin' }, content: [{ type: 'text', text: '技能目录注入：开发 12 个工具' }] } })
+  const out = await h.listeners['system-prompt/assemble'](
+    {}, { agent },
+    async () => ({ sections: [{ name: 'persona', text: 'x' }], tools: [{ name: 'bash' }], variables: { provider: 'p', model: 'deepseek-v4-flash' } }),
+  )
+  const persona = out.sections.find((s) => s.name === 'router-persona').text
+  assert.ok(!persona.includes('do not build test harnesses'), 'plugin text must NOT route the session to react')
+})
+
+// T3: shell-less spawned subagents pass through untouched (PR #5)
+test('assemble skips agents with a parentSession (PR #5)', async () => {
+  const h = claimedHarness({ routerMode: 'spec' })
+  const childAgent = {
+    session: { id: 's-child', header: { parentSession: 's-parent' }, events: [] },
+    options: { model: 'deepseek-v4-flash' },
+  }
+  const base = { sections: [{ name: 'persona', text: 'child persona' }], tools: [], variables: {} }
+  const out = await h.listeners['system-prompt/assemble']({}, { agent: childAgent }, async () => base)
+  assert.equal(out, base, 'child assembly must pass through untouched (no shell crash)')
+})
+
+// T4: weak persona follows the session-selected model (PR #21, issue #9)
+const T4_BASE = {
+  sections: [{ name: 'persona', text: 'old persona' }],
+  tools: [{ name: 'bash' }, { name: 'read' }, { name: 'write' }, { name: 'edit' }, { name: 'glob' }, { name: 'grep' }, { name: 'str_replace_editor' }],
+  contexts: [],
+}
+const T4_USER = { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '看看这个项目现在是什么情况。' }] } }
+async function assembleWeakT4(variables, agentModel) {
+  const h = claimedHarness({ routerMode: 'spec' })
+  const agent = { session: { id: 's-model', events: [T4_USER] }, options: { model: agentModel } }
+  return h.listeners['system-prompt/assemble']({}, { agent }, async () => ({ ...T4_BASE, variables }))
+}
+test('weak persona follows session-selected model, not agent.options (PR #21)', async () => {
+  const out = await assembleWeakT4({ provider: 'opencode-go', model: 'deepseek-v4-flash' }, 'deepseek-v4-pro')
+  const persona = out.sections.find((s) => s.name === 'router-persona').text
+  assert.ok(persona.includes('review what you have already done'), 'should use the Flash weak persona')
+  assert.ok(!persona.includes('You are a helpful software engineer assistant.'), 'should not use the Pro weak persona')
+})
+test('weak persona falls back to agent.options without session selection (PR #21)', async () => {
+  const out = await assembleWeakT4(undefined, 'deepseek-v4-flash')
+  const persona = out.sections.find((s) => s.name === 'router-persona').text
+  assert.ok(persona.includes('review what you have already done'), 'flash fallback')
+})
