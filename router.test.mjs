@@ -1,10 +1,12 @@
 /** Router classifier + continuous mode tests. */
 import assert from 'node:assert/strict'
 import test from 'node:test'
+// v0.2.0 split the single preset into router-standard / router-spec; both
+// share the same router-core.mjs (byte-identical), so test against standard.
 import {
   classifyTask, personaFor, coreFor, bandFor, testinessFor, parseMode, applyPersona,
   isFlashModel, extractText, sessionMode,
-} from './preset/router-core.mjs'
+} from './preset/router-standard/router-core.mjs'
 
 test('react: greenfield/build tasks map to react band', () => {
   assert.equal(bandFor(classifyTask('需要本地开发一个马里奥网页小游戏，参考经典原版')), 'react')
@@ -124,4 +126,55 @@ test('applyPersona replaces only the persona section (keeps plan-mode)', () => {
 test('applyPersona tolerates missing sections', () => {
   const out = applyPersona([], 'p')
   assert.deepEqual(out, [{ name: 'router-persona', text: 'p', order: 0 }])
+})
+
+// ── assembly smoke: bootstrap listener must SURVIVE a real user/message ────
+// Regression for the missing-`extractText` import (bootstrap crashed at the
+// first user message → firstUserText capture + near-field guidance silently
+// dead). A minimal ctx harness replays the session/event path end-to-end.
+import * as bootstrapNs from './preset/router-standard/router-bootstrap.mjs'
+
+function makeHarness() {
+  const appended = []
+  const sessionA = { id: 'smoke-a', events: [] }
+  const sessionB = { id: 'smoke-b', events: [] }
+  const agentA = { session: sessionA, options: { provider: 'p', model: 'deepseek-v4-flash' }, inbox: { append: (type, msg) => appended.push({ type, msg, session: sessionA.id }) } }
+  const agentB = { session: sessionB, options: { provider: 'p', model: 'deepseek-v4-flash' }, inbox: { append: (type, msg) => appended.push({ type, msg, session: sessionB.id }) } }
+  const listeners = {}
+  const ctx = {
+    on(event, cb) { listeners[event] = cb },
+    get(key) {
+      if (key === 'agent') return undefined // exercise the agents-map branch
+      if (key === 'llm') return { stream: async function* () {} }
+      return undefined
+    },
+    effect(fn) { fn() },
+    tools: { register() {} },
+  }
+  bootstrapNs.apply(ctx, { routerMode: 'standard' })
+  const emit = (session, text) => {
+    session.events.push({ type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text }] } })
+    listeners['session/event'](session, { type: 'user/message', data: session.events.at(-1).data })
+  }
+  return { ctx, listeners, emit, appended, agents: [agentA, agentB], sessions: [sessionA, sessionB] }
+}
+
+test('bootstrap listener survives user messages (extractText import present)', async () => {
+  // Session A: first message is COMPLEX → firstUserText captured → band=spec
+  // → strong modes need no guidance, but the listener must not crash.
+  const h = makeHarness()
+  h.ctx.get = (key) => (key === 'agent' ? h.agents[0] : undefined)
+  // re-point agents map via assemble path (as real assembly does)
+  await h.listeners['system-prompt/assemble']({ sections: [], tools: [{ name: 'bash' }] }, { agent: h.agents[0] }, async () => ({ sections: [], tools: [{ name: 'bash' }] }))
+  assert.doesNotThrow(() => h.emit(h.sessions[0], '修复 parse_config 崩溃'))
+  assert.equal(h.appended.filter((a) => a.session === 'smoke-a').length, 0, 'spec band: no guidance appended')
+
+  // Session B: first message is SIMPLE → weak band → GUIDE_WEAK appended.
+  h.ctx.get = (key) => (key === 'agent' ? h.agents[1] : undefined)
+  await h.listeners['system-prompt/assemble']({ sections: [], tools: [{ name: 'bash' }] }, { agent: h.agents[1] }, async () => ({ sections: [], tools: [{ name: 'bash' }] }))
+  assert.doesNotThrow(() => h.emit(h.sessions[1], '今天天气怎么样'))
+  const guides = h.appended.filter((a) => a.session === 'smoke-b' && a.type === 'next-step')
+  assert.equal(guides.length, 1, 'weak band: exactly one guidance appended')
+  assert.match(guides[0].msg.content[0].text, /Router: classify this task/)
+  assert.match(guides[0].msg.id, /^router-guide-/)
 })
