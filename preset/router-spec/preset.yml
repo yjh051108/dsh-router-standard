@@ -1,2 +1,2 @@
 name: Router Spec (experimental)
-description: Task-aware routing — deep-think-first (spec): classified persona + full prompt sections; the long first-turn reasoning chain is the point. Full Standard tools after the first tool call.
+description: 任务感知路由（深度思考优先）：分流规则与 Router Standard 相同，但起步保留完整系统提示与提示区，用更长的首轮推理换取更稳的计划，第一次工具调用后开放标准模式全部工具。
