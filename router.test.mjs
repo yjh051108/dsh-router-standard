@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   classifyTask, personaFor, coreFor, bandFor, testinessFor, parseMode, applyPersona,
-  isFlashModel, extractText, sessionMode,
+  isFlashModel, extractText, sessionMode, bandOf,
 } from './preset/router-standard/router-core.mjs'
 
 test('react: greenfield/build tasks map to react band', () => {
@@ -25,6 +25,27 @@ test('mixed task lands in react band (net react keywords)', () => {
 test('unmatched defaults to weak (internal routing)', () => {
   assert.equal(classifyTask('今天天气怎么样'), 'weak')
   assert.equal(bandFor('weak'), 'weak')
+})
+
+test('v0.2.0 regression: raw text never routes to spec via bandOf', () => {
+  // v0.2.0 stored the RAW first user message as the mode; bandOf(rawText)
+  // coerced Number(text) → NaN → 0 → 'spec', so every task got the spec
+  // persona. Non-numeric modes must fall back to weak, not spec.
+  assert.equal(bandFor('查看 @/workspace/kb/notes/ 目录下的内容。分析这些课程。'), 'weak')
+  assert.equal(bandFor('帮我写一个 Python 脚本处理 CSV'), 'weak') // raw text, not classified
+  assert.equal(bandFor(''), 'weak')
+  assert.equal(bandFor(undefined), 'weak')
+  // legitimate numeric modes and 'weak' are unaffected
+  assert.equal(bandFor(0), 'spec')
+  assert.equal(bandFor(1), 'react')
+  assert.equal(bandFor(0.3), 'mixed')
+})
+
+test('v0.2.0 session-log prompt classifies weak (guidance should fire)', () => {
+  // An analysis prompt (no build/fix keywords) sits in the weak band,
+  // so a fixed router-spec session would inject WEAK_PRO/WEAK_FLASH personas
+  // and the near-field guidance, not SPEC_PERSONA.
+  assert.equal(classifyTask('查看 @/workspace/kb/notes/ 目录下的内容。分析这些课程。'), 'weak')
 })
 
 test('ties default to weak (internal routing)', () => {

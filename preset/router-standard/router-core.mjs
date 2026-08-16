@@ -79,10 +79,15 @@ export function isFlashModel(modelId) {
 /** Quantize a mode to one of the four measured behavior bands. */
 export function bandOf(mode) {
   if (mode === 'weak') return 'weak'
+  // Defensive: raw text / garbage must never coerce into a numeric band.
+  // Number('中文') is NaN, and clamp01's `NaN || 0` yields 0 → 'spec', which
+  // silently routed every task to the spec persona in v0.2.0. Unparseable
+  // modes fall back to weak — the model decides per task.
+  if (typeof mode !== 'number') return 'weak'
   const m = clamp01(mode)
   if (m < 0.2) return 'spec' // measured stable spec region (0..0.15)
   if (m < 0.5) return 'transition' // measured unstable band — avoid
-  return 'react' // measured stable react region (0.5..1 behave alike)
+  return 'react' // stable react region (0.5..1 behave alike)
 }
 
 /** Persona for a mode; weak picks the model-specific internal-routing text. */

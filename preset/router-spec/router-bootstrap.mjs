@@ -20,8 +20,8 @@
  */
 
 import {
-  applyPersona, bandFor, bandOf, coreFor, parseMode, personaFor, sessionMode, testinessFor, clamp01,
-  isComplexTask,
+  applyPersona, bandFor, bandOf, classifyTask, coreFor, parseMode, personaFor, sessionMode,
+  testinessFor, clamp01, extractText, isComplexTask,
 } from './router-core.mjs'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -47,7 +47,7 @@ function toJsonSchema(spec) {
 export function apply(ctx, config) {
   const overrides = new Map() // session id -> explicit mode (number 0..1)
   const agents = new Map() // session id -> Agent (live handle, in-process only)
-  const firstUserText = new Map() // session id -> first REAL user message text (issue #3 fix)
+  const firstUserMode = new Map() // session id -> classifyTask() of the first REAL user message (issue #3 fix)
 
   // ── 路由模式（v0.2.0 命名，用户定义）───────────────────────────────────────
   // standard（默认，新）: RL 接口还原——首轮只有 RL 训练句 + shell/str_replace_editor，
@@ -75,9 +75,9 @@ export function apply(ctx, config) {
     // issue #3 fix: the first assembly happens before the first user/message
     // event lands in session.events, so sessionMode() saw an empty transcript
     // and injected the WEAK band on the path-committing first request. Use the
-    // live text captured by the session/event listener (or inbox pending) so
-    // the first request carries the REAL classification.
-    const mode = overrides.get(session.id) ?? firstUserText.get(session.id) ?? sessionMode(session)
+    // classification captured by the session/event listener (or sessionMode
+    // fallback) so the first request carries the REAL band.
+    const mode = overrides.get(session.id) ?? firstUserMode.get(session.id) ?? sessionMode(session)
     const modelId = agent.options?.model
 
     // ── 模式分派 ──
@@ -138,13 +138,20 @@ export function apply(ctx, config) {
     const data = event.data ?? {}
     if (data.source?.kind !== 'user') return // only real user messages
     const text = extractText(data)
-    if (!firstUserText.has(session.id) && text.trim()) {
-      firstUserText.set(session.id, text.trim()) // issue #3: capture BEFORE assembly
+    // issue #3: classify BEFORE assembly so the path-committing first request
+    // carries the REAL band. Store the classification — never the raw text:
+    // v0.2.0 stored raw text and bandOf(rawText) coerced Number(text) → NaN
+    // → 0 → 'spec', silently routing EVERY task to the spec persona.
+    if (!firstUserMode.has(session.id) && text.trim()) {
+      firstUserMode.set(session.id, classifyTask(text.trim()))
     }
     const agent = ctx.get('agent')
     const target = agent !== undefined && agent.session === session ? agent : [...agents.values()].find((a) => a.session === session)
     if (target === undefined || target.inbox === undefined) return
-    const mode = overrides.get(session.id) ?? firstUserText.get(session.id) ?? sessionMode(session)
+    // Weak-mode guidance is persona routing; only the spec preset injects weak
+    // personas. router-standard keeps its clean RL first request unperturbed.
+    if (routerMode !== 'spec') return
+    const mode = overrides.get(session.id) ?? firstUserMode.get(session.id) ?? sessionMode(session)
     if (bandOf(mode) !== 'weak') return // strong modes need no guidance
     if (!text.trim()) return
     const guide = isComplexTask(text) ? GUIDE_DEEP : GUIDE_WEAK
