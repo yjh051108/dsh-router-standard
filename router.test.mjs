@@ -4,7 +4,7 @@ import test from 'node:test'
 import {
   classifyTask, personaFor, coreFor, bandFor, testinessFor, parseMode, applyPersona,
   isFlashModel, extractText, sessionMode,
-} from './preset/router-core.mjs'
+} from './preset/router-standard/router-core.mjs'
 
 test('react: greenfield/build tasks map to react band', () => {
   assert.equal(bandFor(classifyTask('需要本地开发一个马里奥网页小游戏，参考经典原版')), 'react')
@@ -124,4 +124,67 @@ test('applyPersona replaces only the persona section (keeps plan-mode)', () => {
 test('applyPersona tolerates missing sections', () => {
   const out = applyPersona([], 'p')
   assert.deepEqual(out, [{ name: 'router-persona', text: 'p', order: 0 }])
+})
+
+
+
+// ── plugin-level regression: session-selected model routing (issue #9) ─────
+// dsh-agent's installModelSelection puts the session-selected provider/model
+// into assembled.variables; agent.options holds the launch default. The router
+// must prefer the session selection for weak-persona (Pro/Flash) choice.
+
+import { apply } from './preset/router-standard/router-bootstrap-v1.mjs'
+
+function makeHarness(config = {}) {
+  const listeners = {}
+  const ctx = {
+    on(event, fn) { (listeners[event] ??= []).push(fn) },
+    effect(fn) { fn() },
+    get() { return undefined },
+    llm: {},
+    tools: { register() {} },
+  }
+  apply(ctx, config)
+  return listeners
+}
+
+const ASSEMBLED_BASE = {
+  sections: [{ name: 'persona', text: 'old persona' }],
+  tools: [
+    { name: 'bash' }, { name: 'read' }, { name: 'write' }, { name: 'edit' },
+    { name: 'glob' }, { name: 'grep' }, { name: 'str_replace_editor' }, { name: 'web' },
+  ],
+  contexts: [
+    { name: 'sandbox:policy', text: 'Current DSH file policy: workspace-write.' },
+    { name: 'approval:policy', text: 'Approval policy: ask.' },
+  ],
+}
+
+const WEAK_USER = {
+  type: 'user/message',
+  data: { kind: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '看看这个项目现在是什么情况。' }] },
+}
+
+async function assembleWeak(variables, agentModel) {
+  const listeners = makeHarness({ routerMode: 'spec' })
+  const agent = {
+    session: { id: 's-model', events: [WEAK_USER] },
+    options: { model: agentModel },
+  }
+  const next = async () => ({ ...ASSEMBLED_BASE, variables })
+  return listeners['system-prompt/assemble'][0]({}, { agent }, next)
+}
+
+test('weak persona follows the session-selected model, not agent.options (issue #9)', async () => {
+  // launch default is Pro, but this session actually selected Flash
+  const out = await assembleWeak({ provider: 'opencode-go', model: 'deepseek-v4-flash' }, 'deepseek-v4-pro')
+  const persona = out.sections.find((s) => s.name === 'router-persona').text
+  assert.ok(persona.includes('review what you have already done'), 'should use the Flash weak persona')
+  assert.ok(!persona.includes('You are a helpful software engineer assistant.'), 'should not use the Pro weak persona')
+})
+
+test('weak persona falls back to agent.options when no session selection is present', async () => {
+  const out = await assembleWeak(undefined, 'deepseek-v4-flash')
+  const persona = out.sections.find((s) => s.name === 'router-persona').text
+  assert.ok(persona.includes('review what you have already done'), 'flash fallback')
 })
