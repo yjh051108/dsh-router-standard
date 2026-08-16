@@ -48,6 +48,7 @@ export function apply(ctx, config) {
   const overrides = new Map() // session id -> explicit mode (number 0..1)
   const agents = new Map() // session id -> Agent (live handle, in-process only)
   const firstUserText = new Map() // session id -> first REAL user message text (issue #3 fix)
+  const sessionModels = new Map() // session id -> { provider, model } from assembled.variables (issue #9 fix)
 
   // ── 路由模式（v0.2.0 命名，用户定义）───────────────────────────────────────
   // standard（默认，新）: RL 接口还原——首轮只有 RL 训练句 + shell/str_replace_editor，
@@ -78,7 +79,13 @@ export function apply(ctx, config) {
     // live text captured by the session/event listener (or inbox pending) so
     // the first request carries the REAL classification.
     const mode = overrides.get(session.id) ?? firstUserText.get(session.id) ?? sessionMode(session)
-    const modelId = agent.options?.model
+    // issue #9 fix: the session-selected model rides assembled.variables
+    // (dsh-agent installModelSelection), NOT agent.options (launch default).
+    const selectedModel = assembled.variables?.model
+      ? { provider: assembled.variables?.provider, model: assembled.variables.model }
+      : undefined
+    if (selectedModel?.model) sessionModels.set(session.id, selectedModel)
+    const modelId = selectedModel?.model ?? agent.options?.model
 
     // ── 模式分派 ──
     // standard（RL 接口还原）: 首轮 system = 只有 RL 训练句；身份/Web 定位/工具引导/
@@ -188,7 +195,7 @@ export function apply(ctx, config) {
       const session = currentSession()
       if (session === undefined) return 'no agent session'
       const mode = overrides.get(session.id) ?? sessionMode(session)
-      const modelId = currentAgent()?.options?.model
+      const modelId = sessionModels.get(session.id)?.model ?? currentAgent()?.options?.model
       return [
         `router-mode=${routerMode} (standard=RL接口还原 / spec=深度思考优先)`,
         `mode=${fmtMode(mode)} (band=${bandFor(mode)})`,
@@ -235,8 +242,10 @@ export function apply(ctx, config) {
       if (parsed === null || parsed === 'auto') return `invalid mode "${args.mode}"`
       const session = currentSession()
       const agent = session === undefined ? undefined : [...agents.values()].find((a) => a.session === session)
-      if (agent === undefined || agent.options === undefined) return 'no agent route available'
-      const { provider, model } = agent.options
+      if (agent === undefined) return 'no agent route available'
+      const selectedModel = sessionModels.get(session.id)
+      const provider = selectedModel?.provider ?? agent.options?.provider
+      const model = selectedModel?.model ?? agent.options?.model
       if (!provider || !model) return 'agent route missing provider/model'
 
       const persona = personaFor(parsed, model)
