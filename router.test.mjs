@@ -132,9 +132,12 @@ test('applyPersona tolerates missing sections', () => {
 // Regression for the missing-`extractText` import (bootstrap crashed at the
 // first user message → firstUserText capture + near-field guidance silently
 // dead). A minimal ctx harness replays the session/event path end-to-end.
-import * as bootstrapNs from './preset/router-standard/router-bootstrap.mjs'
+// Both bootstrap variants are covered: v1 is the file the preset's
+// agent.cordis.yml actually mounts; v2 ships alongside as the same code.
+import * as bootstrapV1 from './preset/router-standard/router-bootstrap-v1.mjs'
+import * as bootstrapV2 from './preset/router-standard/router-bootstrap.mjs'
 
-function makeHarness() {
+function makeHarness(bootstrapNs) {
   const appended = []
   const sessionA = { id: 'smoke-a', events: [] }
   const sessionB = { id: 'smoke-b', events: [] }
@@ -159,22 +162,27 @@ function makeHarness() {
   return { ctx, listeners, emit, appended, agents: [agentA, agentB], sessions: [sessionA, sessionB] }
 }
 
-test('bootstrap listener survives user messages (extractText import present)', async () => {
-  // Session A: first message is COMPLEX → firstUserText captured → band=spec
-  // → strong modes need no guidance, but the listener must not crash.
-  const h = makeHarness()
-  h.ctx.get = (key) => (key === 'agent' ? h.agents[0] : undefined)
-  // re-point agents map via assemble path (as real assembly does)
-  await h.listeners['system-prompt/assemble']({ sections: [], tools: [{ name: 'bash' }] }, { agent: h.agents[0] }, async () => ({ sections: [], tools: [{ name: 'bash' }] }))
-  assert.doesNotThrow(() => h.emit(h.sessions[0], '修复 parse_config 崩溃'))
-  assert.equal(h.appended.filter((a) => a.session === 'smoke-a').length, 0, 'spec band: no guidance appended')
+function runSmoke(bootstrapNs) {
+  return async () => {
+    // Session A: first message is COMPLEX → firstUserText captured → band=spec
+    // → strong modes need no guidance, but the listener must not crash.
+    const h = makeHarness(bootstrapNs)
+    h.ctx.get = (key) => (key === 'agent' ? h.agents[0] : undefined)
+    // re-point agents map via assemble path (as real assembly does)
+    await h.listeners['system-prompt/assemble']({ sections: [], tools: [{ name: 'bash' }] }, { agent: h.agents[0] }, async () => ({ sections: [], tools: [{ name: 'bash' }] }))
+    assert.doesNotThrow(() => h.emit(h.sessions[0], '修复 parse_config 崩溃'))
+    assert.equal(h.appended.filter((a) => a.session === 'smoke-a').length, 0, 'spec band: no guidance appended')
 
-  // Session B: first message is SIMPLE → weak band → GUIDE_WEAK appended.
-  h.ctx.get = (key) => (key === 'agent' ? h.agents[1] : undefined)
-  await h.listeners['system-prompt/assemble']({ sections: [], tools: [{ name: 'bash' }] }, { agent: h.agents[1] }, async () => ({ sections: [], tools: [{ name: 'bash' }] }))
-  assert.doesNotThrow(() => h.emit(h.sessions[1], '今天天气怎么样'))
-  const guides = h.appended.filter((a) => a.session === 'smoke-b' && a.type === 'next-step')
-  assert.equal(guides.length, 1, 'weak band: exactly one guidance appended')
-  assert.match(guides[0].msg.content[0].text, /Router: classify this task/)
-  assert.match(guides[0].msg.id, /^router-guide-/)
-})
+    // Session B: first message is SIMPLE → weak band → GUIDE_WEAK appended.
+    h.ctx.get = (key) => (key === 'agent' ? h.agents[1] : undefined)
+    await h.listeners['system-prompt/assemble']({ sections: [], tools: [{ name: 'bash' }] }, { agent: h.agents[1] }, async () => ({ sections: [], tools: [{ name: 'bash' }] }))
+    assert.doesNotThrow(() => h.emit(h.sessions[1], '今天天气怎么样'))
+    const guides = h.appended.filter((a) => a.session === 'smoke-b' && a.type === 'next-step')
+    assert.equal(guides.length, 1, 'weak band: exactly one guidance appended')
+    assert.match(guides[0].msg.content[0].text, /Router: classify this task/)
+    assert.match(guides[0].msg.id, /^router-guide-/)
+  }
+}
+
+test('bootstrap v1 (mounted by agent.cordis.yml) listener survives user messages', runSmoke(bootstrapV1))
+test('bootstrap v2 (ships alongside) listener survives user messages', runSmoke(bootstrapV2))

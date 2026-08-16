@@ -20,7 +20,7 @@
  */
 
 import {
-  applyPersona, bandFor, bandOf, coreFor, parseMode, personaFor, sessionMode, testinessFor, clamp01,
+  applyPersona, bandFor, bandOf, classifyTask, coreFor, extractText, parseMode, personaFor, sessionMode, testinessFor, clamp01,
   isComplexTask,
 } from './router-core.mjs'
 
@@ -48,6 +48,19 @@ export function apply(ctx, config) {
   const overrides = new Map() // session id -> explicit mode (number 0..1)
   const agents = new Map() // session id -> Agent (live handle, in-process only)
   const firstUserText = new Map() // session id -> first REAL user message text (issue #3 fix)
+
+  /** Unified mode for a session: override value, else first-user-text
+   *  classification, else session state. All three sources must yield the
+   *  SAME mode type (0 | 1 | 'weak'); passing raw text into bandOf() would
+   *  clamp01(NaN) → 0 → spec for EVERY text, silently killing weak-band
+   *  guidance and misrouting simple tasks to spec. */
+  function currentMode(session) {
+    const override = overrides.get(session.id)
+    if (override !== undefined) return override
+    const text = firstUserText.get(session.id)
+    if (text !== undefined) return classifyTask(text)
+    return sessionMode(session)
+  }
 
   // ── 路由模式（v0.2.0 命名，用户定义）───────────────────────────────────────
   // standard（默认，新）: RL 接口还原——首轮只有 RL 训练句 + shell/str_replace_editor，
@@ -77,7 +90,7 @@ export function apply(ctx, config) {
     // and injected the WEAK band on the path-committing first request. Use the
     // live text captured by the session/event listener (or inbox pending) so
     // the first request carries the REAL classification.
-    const mode = overrides.get(session.id) ?? firstUserText.get(session.id) ?? sessionMode(session)
+    const mode = currentMode(session)
     const modelId = agent.options?.model
 
     // ── 模式分派 ──
@@ -144,7 +157,7 @@ export function apply(ctx, config) {
     const agent = ctx.get('agent')
     const target = agent !== undefined && agent.session === session ? agent : [...agents.values()].find((a) => a.session === session)
     if (target === undefined || target.inbox === undefined) return
-    const mode = overrides.get(session.id) ?? firstUserText.get(session.id) ?? sessionMode(session)
+    const mode = currentMode(session)
     if (bandOf(mode) !== 'weak') return // strong modes need no guidance
     if (!text.trim()) return
     const guide = isComplexTask(text) ? GUIDE_DEEP : GUIDE_WEAK
