@@ -1,6 +1,6 @@
 {
   "name": "dsh-router-standard",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Task-aware reasoning-mode router for DeepSeek Harness: RL-interface restoration (one-sentence persona + shell/editor surface), measured behavior bands, first-turn injection, agent-visible tuning.",
   "private": false,
   "license": "MIT",

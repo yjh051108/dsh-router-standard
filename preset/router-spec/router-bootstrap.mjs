@@ -159,6 +159,41 @@ export function apply(ctx, config) {
   const GUIDE_DEEP =
     '\nRouter: classify this task (build or fix) now, then adopt the matching style — build: direct production; fix: inspect-first. Think deeply about the architecture, edge cases, and integration points. Do not spend reasoning on the environment or tooling. Produce when your information is complete. End each reasoning block with a decision or an information need.'
 
+
+  // ── bootstrap context strip (port of dsh-anchored-standard's
+  //    suppressedContextSources pre-step filter, upstream PR #29) ──────────
+  // dsh-agent-instructions and dsh-tool-skill inject the AGENTS.md digest and
+  // the skill catalog as user messages before the first request. 'contexts:
+  // []' only strips the contexts channel — these are user messages, so in
+  // workspaces carrying AGENTS.md the "clean RL first request" premise
+  // breaks (measured: we-trajectory anchor 0/9 with the catalog present on
+  // V4 Flash vs ~81% without). Hold both auto-injected reminder kinds back
+  // until the first durable tool/call promotes the session; the messages
+  // stay persisted, so they flow back into every later window on their own —
+  // restore needs no code. `prepend: true` keeps this strip the OUTERMOST
+  // pre-step transform (row application is concurrent; row order alone does
+  // not decide listener order), so it removes what the injector listeners
+  // add. The injector plugins stay mounted (their tools belong to the
+  // promoted catalog); user-initiated skill gestures are not in the set.
+  ctx.on('agent/pre-step', async ({ agent }, next) => {
+    // Downstream errors propagate untouched; only this filter's own logic is guarded.
+    const decision = await next()
+    if (decision.kind === 'reject') return decision
+    try {
+      const session = agent?.session
+      if (session === undefined || !Array.isArray(decision.messages)) return decision
+      if (session.events?.some((event) => event.type === 'tool/call')) return decision
+      const kept = decision.messages.filter((message) => {
+        const kind = message?.source?.kind
+        return kind !== 'agent-instructions' && kind !== 'skill-catalog'
+      })
+      return kept.length === decision.messages.length ? decision : { ...decision, messages: kept }
+    } catch {
+      // A filter bug must never eat context: degrade to keeping every message.
+      return decision
+    }
+  }, { prepend: true })
+
   // ── first-turn routing: agent/inbox/claimed (PR #17, issue #13) ────────
   // The loop claims the inbox BEFORE assembling the system prompt (preStep:
   // inbox.claim → systemPrompt.assemble), and the claimed event carries the

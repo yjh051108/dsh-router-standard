@@ -277,3 +277,48 @@ test('weak persona falls back to agent.options without session selection (PR #21
   const persona = out.sections.find((s) => s.name === 'router-persona').text
   assert.ok(persona.includes('review what you have already done'), 'flash fallback')
 })
+
+// ── absorbed upstream fixes: PR #29 (AGENTS.md / skill-catalog strip) ─────
+test('pre-step strips agent-instructions/skill-catalog before promotion (PR #29)', async () => {
+  const h = claimedHarness({ routerMode: 'spec' })
+  const session = { id: 's-strip', events: [] }
+  const agent = { session, options: { model: 'deepseek-v4-flash' } }
+  const strip = h.listeners['agent/pre-step']
+  assert.ok(strip, 'pre-step filter must be registered')
+  const decision = {
+    kind: 'step',
+    messages: [
+      { source: { kind: 'agent-instructions' }, content: [{ type: 'text', text: 'AGENTS.md 摘要…' }] },
+      { source: { kind: 'skill-catalog' }, content: [{ type: 'text', text: '技能目录…' }] },
+      { source: { kind: 'user' }, content: [{ type: 'text', text: '你好' }] },
+    ],
+  }
+  const out = await strip({ agent }, async () => decision)
+  assert.deepEqual(out.messages.map((m) => m.source.kind), ['user'], 'injections stripped before promotion')
+})
+
+test('pre-step keeps injections after promotion, passes reject through (PR #29)', async () => {
+  const h = claimedHarness({ routerMode: 'spec' })
+  const promoted = { id: 's-strip2', events: [{ type: 'tool/call', data: {} }] }
+  const agent = { session: promoted, options: { model: 'deepseek-v4-flash' } }
+  const strip = h.listeners['agent/pre-step']
+  const decision = { kind: 'step', messages: [{ source: { kind: 'agent-instructions' }, content: [] }] }
+  const out = await strip({ agent }, async () => decision)
+  assert.equal(out.messages.length, 1, 'promoted session: injections flow back')
+  const rejected = { kind: 'reject', messages: [] }
+  const out2 = await strip({ agent }, async () => rejected)
+  assert.equal(out2, rejected, 'reject passes through untouched')
+})
+
+test('pre-step: filter error degrades to keep-all, downstream error propagates (PR #29)', async () => {
+  const h = claimedHarness({ routerMode: 'spec' })
+  const session = { id: 's-strip3', events: [] }
+  const agent = { session, options: { model: 'deepseek-v4-flash' } }
+  const strip = h.listeners['agent/pre-step']
+  // filter-INTERNAL error (during stripping) → degrade to keep-all
+  const decision = { kind: 'step', messages: new Proxy([], { get() { throw new Error('filter boom') } }) }
+  const out = await strip({ agent }, async () => decision)
+  assert.equal(out, decision, 'filter error degrades to keep-all')
+  // downstream error (next()) → propagates untouched
+  await assert.rejects(() => strip({ agent }, async () => { throw new Error('downstream boom') }), /downstream boom/)
+})

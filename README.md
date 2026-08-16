@@ -38,6 +38,7 @@
 | 版本 | 内容 | 测试 | 发布 |
 |---|---|---|---|
 | **0.2.1（吸收前）** | 5 项原始修复：① 补漏导入 `extractText`（监听器首条消息必崩）② `firstUserText` 类型统一（`bandOf(原文)` 恒 spec 的隐藏缺陷，新增 `currentMode()`）③ 装配链 v1 同步（`agent.cordis.yml` 实际挂载 `router-bootstrap-v1.mjs`）④ 近场引导注入死锁（`session.append` reenter 保护 → `queueMicrotask` 延迟注入）⑤ 测试补齐（冒烟测试 v1+v2） | 17/17 | tag `v0.2.1` + Release（含 tgz） |
+| **0.2.3（吸收 #29）** | 0.2.2 全部 + **#29** `agent/pre-step` 请求剥离（晋升前剥离 AGENTS.md/技能目录自动注入，晋升后回流；下游错误传播/自身错误降级全保留） | 26/26 | tag `v0.2.3` + Release（含 tgz） |
 | **0.2.2（吸收后）** | 0.2.1 全部 + 吸收上游 3 个 PR：① **#17** `agent/inbox/claimed` 首轮路由（不依赖事件时序）+ `sessionMode` 只分类 `kind=user` 消息（并修复其嵌套形状回归）② **#21** 会话选择模型（`assembled.variables`）优先于 `agent.options`（issue #9）③ **#5** 子代理（`parentSession`）跳过 router 组装（shell-less 不崩溃） | 23/23 | tag `v0.2.2` + Release（含 tgz） |
 
 - **吸收流程**（用户要求）：6 项吸收回归测试先在未吸收代码上跑（17/23 复现 4 类 bug）→ 吸收后 23/23 全绿。
