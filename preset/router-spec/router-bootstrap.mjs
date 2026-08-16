@@ -102,7 +102,7 @@ export function apply(ctx, config) {
     }
 
     if (session.events.some((event) => event.type === 'tool/call')) {
-      return { ...assembled, sections, contexts: [] } // promoted: full catalog
+      return { ...assembled, sections } // promoted: full catalog, contexts restored
     }
 
     const available = new Set(assembled.tools.map((tool) => tool.name))
