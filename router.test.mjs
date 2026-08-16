@@ -171,12 +171,14 @@ function runSmoke(bootstrapNs) {
     // re-point agents map via assemble path (as real assembly does)
     await h.listeners['system-prompt/assemble']({ sections: [], tools: [{ name: 'bash' }] }, { agent: h.agents[0] }, async () => ({ sections: [], tools: [{ name: 'bash' }] }))
     assert.doesNotThrow(() => h.emit(h.sessions[0], '修复 parse_config 崩溃'))
+    await Promise.resolve() // let the deferred guide append (queueMicrotask) run
     assert.equal(h.appended.filter((a) => a.session === 'smoke-a').length, 0, 'spec band: no guidance appended')
 
     // Session B: first message is SIMPLE → weak band → GUIDE_WEAK appended.
     h.ctx.get = (key) => (key === 'agent' ? h.agents[1] : undefined)
     await h.listeners['system-prompt/assemble']({ sections: [], tools: [{ name: 'bash' }] }, { agent: h.agents[1] }, async () => ({ sections: [], tools: [{ name: 'bash' }] }))
     assert.doesNotThrow(() => h.emit(h.sessions[1], '今天天气怎么样'))
+    await Promise.resolve() // let the deferred guide append (queueMicrotask) run
     const guides = h.appended.filter((a) => a.session === 'smoke-b' && a.type === 'next-step')
     assert.equal(guides.length, 1, 'weak band: exactly one guidance appended')
     assert.match(guides[0].msg.content[0].text, /Router: classify this task/)

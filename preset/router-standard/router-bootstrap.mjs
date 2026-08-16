@@ -161,14 +161,21 @@ export function apply(ctx, config) {
     if (bandOf(mode) !== 'weak') return // strong modes need no guidance
     if (!text.trim()) return
     const guide = isComplexTask(text) ? GUIDE_DEEP : GUIDE_WEAK
-    try {
-      target.inbox.append('next-step', {
-        id: `router-guide-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        role: 'user',
-        source: { kind: 'plugin', plugin: 'router-bootstrap' },
-        content: [{ type: 'text', text: guide }],
-      })
-    } catch { /* duplicate/ordering races: skip */ }
+    // The listener runs synchronously INSIDE the user/message append dispatch
+    // window; session.append has a reenter guard, so appending the guide here
+    // throws "session append cannot reenter". Defer to a microtask: by then
+    // the outer append has finished and the guide lands in next-step before
+    // the agent loop checks it for the follow-up step.
+    queueMicrotask(() => {
+      try {
+        target.inbox.append('next-step', {
+          id: `router-guide-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          role: 'user',
+          source: { kind: 'plugin', plugin: 'router-bootstrap' },
+          content: [{ type: 'text', text: guide }],
+        })
+      } catch { /* duplicate/ordering races: skip */ }
+    })
   })
 
   // ── router visibility & tuning (agent self-optimization) ────────────────
