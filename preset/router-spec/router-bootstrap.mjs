@@ -21,7 +21,7 @@
 
 import {
   applyPersona, bandFor, bandOf, classifyTask, coreFor, parseMode, personaFor, sessionMode,
-  testinessFor, clamp01, extractText, isComplexTask,
+  testinessFor, clamp01, extractText, isComplexTask, stripBootstrapContext,
 } from './router-core.mjs'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -119,6 +119,34 @@ export function apply(ctx, config) {
       tools: assembled.tools.filter((tool) => core.has(tool.name)),
     }
   })
+
+  // ── bootstrap context strip (port of dsh-anchored-standard's
+  //    suppressedContextSources pre-step filter) ─────────────────────────────
+  // dsh-agent-instructions and dsh-tool-skill inject the AGENTS.md digest and
+  // the skill catalog as user messages BEFORE the first request, which breaks
+  // the clean-RL-first-request premise in skilled workspaces (measured:
+  // +5.7K input tokens on request #1; the we-trajectory anchor does not
+  // survive the catalog). Hold both reminder kinds back until promotion; the
+  // persisted messages then flow back into every later window on their own.
+  // `prepend: true` keeps this strip the OUTERMOST pre-step transform — row
+  // application is concurrent, so row order alone does not decide listener
+  // order (anchored issue #6) — so it removes what injector listeners add.
+  ctx.on('agent/pre-step', async ({ agent }, next) => {
+    // Downstream errors propagate untouched; only this filter's own logic is guarded.
+    const decision = await next()
+    if (decision.kind === 'reject') return decision
+    try {
+      const session = agent?.session
+      if (session === undefined) return decision
+      const promoted = Array.isArray(session.events)
+        && session.events.some((event) => event.type === 'tool/call')
+      const messages = stripBootstrapContext(decision.messages, promoted)
+      return messages === decision.messages ? decision : { ...decision, messages }
+    } catch {
+      // A filter bug must never eat context: degrade to keeping every message.
+      return decision
+    }
+  }, { prepend: true })
 
   // ── near-field routing guidance for weak mode (P14/P16/P17/P19/P20) ─────
   // Every REAL user message in a weak-mode session gets ONE fixed guidance

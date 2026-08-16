@@ -150,6 +150,29 @@ export function classifyTask(text) {
   return 'weak'
 }
 
+/** Bootstrap-phase injected-context sources to hold back from the request
+ *  window until promotion (port of dsh-anchored-standard's
+ *  suppressedContextSources). The source plugins STAY MOUNTED — their tools
+ *  belong to the promoted catalog; only their auto-injected reminder
+ *  messages (AGENTS.md digest, skill catalog) are stripped from the
+ *  path-committing first request. The messages stay persisted, so once the
+ *  session promotes they flow back into every later window on their own —
+ *  restore needs no code. */
+export const BOOTSTRAP_SUPPRESSED_SOURCES = ['agent-instructions', 'skill-catalog']
+
+/** Keep only messages whose source.kind is not bootstrap-suppressed.
+ *  Promoted sessions get the untouched list (restore-on-promotion).
+ *  Non-string kinds are kept; an unparseable input returns the input. */
+export function stripBootstrapContext(messages, promoted, suppressed = BOOTSTRAP_SUPPRESSED_SOURCES) {
+  if (promoted || !Array.isArray(messages)) return messages
+  const blocked = new Set(suppressed)
+  const kept = messages.filter((m) => {
+    const kind = m?.source?.kind
+    return typeof kind !== 'string' || !blocked.has(kind)
+  })
+  return kept.length === messages.length ? messages : kept
+}
+
 /** Per-session mode derived from durable events (resume-safe). */
 export function sessionMode(session) {
   const events = session.events

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   classifyTask, personaFor, coreFor, bandFor, testinessFor, parseMode, applyPersona,
-  isFlashModel, extractText, sessionMode, bandOf,
+  isFlashModel, extractText, sessionMode, bandOf, stripBootstrapContext,
 } from './preset/router-standard/router-core.mjs'
 
 test('react: greenfield/build tasks map to react band', () => {
@@ -46,6 +46,25 @@ test('v0.2.0 session-log prompt classifies weak (guidance should fire)', () => {
   // so a fixed router-spec session would inject WEAK_PRO/WEAK_FLASH personas
   // and the near-field guidance, not SPEC_PERSONA.
   assert.equal(classifyTask('查看 @/workspace/kb/notes/ 目录下的内容。分析这些课程。'), 'weak')
+})
+
+test('v3: injected AGENTS.md/skill-catalog reminders held back until promotion', () => {
+  const msgs = [
+    { id: 'u1', role: 'user', source: { kind: 'user' }, content: [] },
+    { id: 'i1', role: 'user', source: { kind: 'agent-instructions' }, content: [] },
+    { id: 'i2', role: 'user', source: { kind: 'skill-catalog' }, content: [] },
+    { id: 'g1', role: 'user', source: { kind: 'skill-invocation' }, content: [] },
+    { id: 'x1', role: 'user', content: [] }, // 无 source 的消息必须保留
+  ]
+  // 未晋升（首请求）：两条自动注入被剥离；用户消息、技能手势、无 source 消息保留
+  const stripped = stripBootstrapContext(msgs, false)
+  assert.deepEqual(stripped.map((m) => m.id), ['u1', 'g1', 'x1'])
+  // 晋升后：原样返回同一引用——持久消息自然回流，恢复无需代码
+  assert.equal(stripBootstrapContext(msgs, true), msgs)
+  // 无注入时零拷贝
+  assert.equal(stripBootstrapContext([{ id: 'u1' }], false).length, 1)
+  // 非数组输入防御
+  assert.equal(stripBootstrapContext(undefined, false), undefined)
 })
 
 test('ties default to weak (internal routing)', () => {
