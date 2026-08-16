@@ -20,7 +20,7 @@
  */
 
 import {
-  applyPersona, bandFor, bandOf, coreFor, parseMode, personaFor, sessionMode, testinessFor, clamp01,
+  applyPersona, bandFor, bandOf, coreFor, extractText, parseMode, personaFor, sessionMode, testinessFor, clamp01,
   isComplexTask,
 } from './router-core.mjs'
 
@@ -156,6 +156,26 @@ export function apply(ctx, config) {
         content: [{ type: 'text', text: guide }],
       })
     } catch { /* duplicate/ordering races: skip */ }
+  })
+
+  // ── issue #13 real fix: first-turn routing ───────────────────────────────
+  // The session/event 'user/message' firehose fires only AFTER the first
+  // assembly (the agent loop appends the message to the session at step
+  // start), so a listener on it alone still routes the FIRST request to
+  // weak. The guaranteed-before-assemble hook is `agent/inbox/claimed`:
+  // the loop claims the inbox BEFORE assembling the system prompt
+  // (preStep: inbox.claim → systemPrompt.assemble), and the claimed event
+  // carries the raw message — so the first request already sees the REAL
+  // classification. Filter source.kind === 'user' to ignore plugin-injected
+  // steering (user-approval etc.) that would otherwise pin the session weak.
+  ctx.on('agent/inbox/claimed', ({ agent, message }) => {
+    if (message?.source?.kind !== 'user') return
+    const text = extractText(message)
+    if (!text.trim()) return
+    const session = agent?.session
+    if (session !== undefined && !firstUserText.has(session.id)) {
+      firstUserText.set(session.id, text.trim())
+    }
   })
 
   // ── router visibility & tuning (agent self-optimization) ────────────────
