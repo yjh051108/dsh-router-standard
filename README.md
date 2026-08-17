@@ -30,6 +30,21 @@
 > The router therefore quantizes to the stable regions instead of pretending
 > the axis is continuously tunable.
 
+## Fork 版本说明（本 fork：huozhetiaozhehuopopo/dsh-router-standard）
+
+> 本 fork 在**上游 v0.2.0（f9667f7）仍带病**的前提下维护修复版，版本语义：
+> **x.y.1 = 修复版（不含他人 PR），x.y.2 = 修复 + 吸收其他贡献者改进**。
+
+| 版本 | 内容 | 测试 | 发布 |
+|---|---|---|---|
+| **0.2.1（吸收前）** | 5 项原始修复：① 补漏导入 `extractText`（监听器首条消息必崩）② `firstUserText` 类型统一（`bandOf(原文)` 恒 spec 的隐藏缺陷，新增 `currentMode()`）③ 装配链 v1 同步（`agent.cordis.yml` 实际挂载 `router-bootstrap-v1.mjs`）④ 近场引导注入死锁（`session.append` reenter 保护 → `queueMicrotask` 延迟注入）⑤ 测试补齐（冒烟测试 v1+v2） | 17/17 | tag `v0.2.1` + Release（含 tgz） |
+| **0.2.3（吸收 #29）** | 0.2.2 全部 + **#29** `agent/pre-step` 请求剥离（晋升前剥离 AGENTS.md/技能目录自动注入，晋升后回流；下游错误传播/自身错误降级全保留） | 26/26 | tag `v0.2.3` + Release（含 tgz） |
+| **0.2.2（吸收后）** | 0.2.1 全部 + 吸收上游 3 个 PR：① **#17** `agent/inbox/claimed` 首轮路由（不依赖事件时序）+ `sessionMode` 只分类 `kind=user` 消息（并修复其嵌套形状回归）② **#21** 会话选择模型（`assembled.variables`）优先于 `agent.options`（issue #9）③ **#5** 子代理（`parentSession`）跳过 router 组装（shell-less 不崩溃） | 23/23 | tag `v0.2.2` + Release（含 tgz） |
+
+- **吸收流程**（用户要求）：6 项吸收回归测试先在未吸收代码上跑（17/23 复现 4 类 bug）→ 吸收后 23/23 全绿。
+- **与上游的关系**：修复与改进已通过 PR #32（`fix/extracttext-import` 分支）回馈上游，待作者审查；上游 main 合并前仍带病，请勿直接使用上游版。
+- 每个 commit/PR/Release 末尾附**生成署名**（模型/思考模式/harness/预设）。
+
 ## What it does
 
 **standard mode**: on the first model request the system prompt is reduced to
@@ -144,7 +159,8 @@ keywords):
 ## Tests
 
 ```sh
-node --test router.test.mjs   # 11 tests: classification, bands, personas, plan-section survival
+node --test router.test.mjs   # 23 tests: classification, bands, personas, plan-section survival,
+                                  #        assembly smoke (v1+v2), absorbed-PR regressions (#17/#21/#5)
 ```
 
 ## Files

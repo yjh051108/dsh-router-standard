@@ -20,7 +20,7 @@
  */
 
 import {
-  applyPersona, bandFor, bandOf, coreFor, parseMode, personaFor, sessionMode, testinessFor, clamp01,
+  applyPersona, bandFor, bandOf, classifyTask, coreFor, extractText, parseMode, personaFor, sessionMode, testinessFor, clamp01,
   isComplexTask,
 } from './router-core.mjs'
 
@@ -48,6 +48,20 @@ export function apply(ctx, config) {
   const overrides = new Map() // session id -> explicit mode (number 0..1)
   const agents = new Map() // session id -> Agent (live handle, in-process only)
   const firstUserText = new Map() // session id -> first REAL user message text (issue #3 fix)
+  const sessionModels = new Map() // session id -> { provider, model } from assembled.variables (issue #9 fix)
+
+  /** Unified mode for a session: override value, else first-user-text
+   *  classification, else session state. All three sources must yield the
+   *  SAME mode type (0 | 1 | 'weak'); passing raw text into bandOf() would
+   *  clamp01(NaN) → 0 → spec for EVERY text, silently killing weak-band
+   *  guidance and misrouting simple tasks to spec. */
+  function currentMode(session) {
+    const override = overrides.get(session.id)
+    if (override !== undefined) return override
+    const text = firstUserText.get(session.id)
+    if (text !== undefined) return classifyTask(text)
+    return sessionMode(session)
+  }
 
   // ── 路由模式（v0.2.0 命名，用户定义）───────────────────────────────────────
   // standard（默认，新）: RL 接口还原——首轮只有 RL 训练句 + shell/str_replace_editor，
@@ -82,6 +96,12 @@ export function apply(ctx, config) {
     const assembled = await next()
     const agent = context.agent
     if (agent === undefined) return assembled
+    // Spawned subagents are clean child tasks with their own scoped tool sets
+    // (e.g. a child restricted to memory tools has no shell); the router
+    // governs root (user) sessions only, so let children pass through
+    // untouched. Previously a shell-less child crashed every one of its turns
+    // with "no platform shell in catalog".
+    if (agent.session?.header?.parentSession !== undefined) return assembled
     const session = agent.session
     agents.set(session.id, agent)
 
@@ -90,8 +110,14 @@ export function apply(ctx, config) {
     // and injected the WEAK band on the path-committing first request. Use the
     // live text captured by the session/event listener (or inbox pending) so
     // the first request carries the REAL classification.
-    const mode = overrides.get(session.id) ?? firstUserText.get(session.id) ?? sessionMode(session)
-    const modelId = agent.options?.model
+    const mode = currentMode(session)
+    // issue #9 fix: the session-selected model rides assembled.variables
+    // (dsh-agent installModelSelection), NOT agent.options (launch default).
+    const selectedModel = assembled.variables?.model
+      ? { provider: assembled.variables?.provider, model: assembled.variables.model }
+      : undefined
+    if (selectedModel?.model) sessionModels.set(session.id, selectedModel)
+    const modelId = selectedModel?.model ?? agent.options?.model
 
     // ── 模式分派 ──
     // standard（RL 接口还原）: 首轮 system = 只有 RL 训练句；身份/Web 定位/工具引导/
@@ -166,6 +192,57 @@ export function apply(ctx, config) {
     + ' 我们以决策或信息需求结束每个推理块；我们收敛、我们交付。'
     '\nRouter: classify this task (build or fix) now, then adopt the matching style — build: direct production; fix: inspect-first. Think deeply about the architecture, edge cases, and integration points. Do not spend reasoning on the environment or tooling. Produce when your information is complete. End each reasoning block with a decision or an information need.'
 
+
+  // ── bootstrap context strip (port of dsh-anchored-standard's
+  //    suppressedContextSources pre-step filter, upstream PR #29) ──────────
+  // dsh-agent-instructions and dsh-tool-skill inject the AGENTS.md digest and
+  // the skill catalog as user messages before the first request. 'contexts:
+  // []' only strips the contexts channel — these are user messages, so in
+  // workspaces carrying AGENTS.md the "clean RL first request" premise
+  // breaks (measured: we-trajectory anchor 0/9 with the catalog present on
+  // V4 Flash vs ~81% without). Hold both auto-injected reminder kinds back
+  // until the first durable tool/call promotes the session; the messages
+  // stay persisted, so they flow back into every later window on their own —
+  // restore needs no code. `prepend: true` keeps this strip the OUTERMOST
+  // pre-step transform (row application is concurrent; row order alone does
+  // not decide listener order), so it removes what the injector listeners
+  // add. The injector plugins stay mounted (their tools belong to the
+  // promoted catalog); user-initiated skill gestures are not in the set.
+  ctx.on('agent/pre-step', async ({ agent }, next) => {
+    // Downstream errors propagate untouched; only this filter's own logic is guarded.
+    const decision = await next()
+    if (decision.kind === 'reject') return decision
+    try {
+      const session = agent?.session
+      if (session === undefined || !Array.isArray(decision.messages)) return decision
+      if (session.events?.some((event) => event.type === 'tool/call')) return decision
+      const kept = decision.messages.filter((message) => {
+        const kind = message?.source?.kind
+        return kind !== 'agent-instructions' && kind !== 'skill-catalog'
+      })
+      return kept.length === decision.messages.length ? decision : { ...decision, messages: kept }
+    } catch {
+      // A filter bug must never eat context: degrade to keeping every message.
+      return decision
+    }
+  }, { prepend: true })
+
+  // ── first-turn routing: agent/inbox/claimed (PR #17, issue #13) ────────
+  // The loop claims the inbox BEFORE assembling the system prompt (preStep:
+  // inbox.claim → systemPrompt.assemble), and the claimed event carries the
+  // raw message — so the FIRST request already sees the REAL classification.
+  // Filter source.kind === 'user' so plugin-injected steering (user-approval
+  // etc.) can never pin the session to a wrong band.
+  ctx.on('agent/inbox/claimed', ({ agent, message }) => {
+    if (message?.source?.kind !== 'user') return
+    const text = extractText(message)
+    if (!text.trim()) return
+    const session = agent?.session
+    if (session !== undefined && !firstUserText.has(session.id)) {
+      firstUserText.set(session.id, text.trim())
+    }
+  })
+
   ctx.on('session/event', (session, event) => {
     if (event.type !== 'user/message') return
     const data = event.data ?? {}
@@ -177,18 +254,25 @@ export function apply(ctx, config) {
     const agent = ctx.get('agent')
     const target = agent !== undefined && agent.session === session ? agent : [...agents.values()].find((a) => a.session === session)
     if (target === undefined || target.inbox === undefined) return
-    const mode = overrides.get(session.id) ?? firstUserText.get(session.id) ?? sessionMode(session)
+    const mode = currentMode(session)
     if (bandOf(mode) !== 'weak') return // strong modes need no guidance
     if (!text.trim()) return
     const guide = isComplexTask(text) ? GUIDE_DEEP : GUIDE_WEAK
-    try {
-      target.inbox.append('next-step', {
-        id: `router-guide-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        role: 'user',
-        source: { kind: 'plugin', plugin: 'router-bootstrap' },
-        content: [{ type: 'text', text: guide }],
-      })
-    } catch { /* duplicate/ordering races: skip */ }
+    // The listener runs synchronously INSIDE the user/message append dispatch
+    // window; session.append has a reenter guard, so appending the guide here
+    // throws "session append cannot reenter". Defer to a microtask: by then
+    // the outer append has finished and the guide lands in next-step before
+    // the agent loop checks it for the follow-up step.
+    queueMicrotask(() => {
+      try {
+        target.inbox.append('next-step', {
+          id: `router-guide-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+          role: 'user',
+          source: { kind: 'plugin', plugin: 'router-bootstrap' },
+          content: [{ type: 'text', text: guide }],
+        })
+      } catch { /* duplicate/ordering races: skip */ }
+    })
   })
 
   // ── router visibility & tuning (agent self-optimization) ────────────────
@@ -221,7 +305,7 @@ export function apply(ctx, config) {
       const session = currentSession()
       if (session === undefined) return 'no agent session'
       const mode = overrides.get(session.id) ?? sessionMode(session)
-      const modelId = currentAgent()?.options?.model
+      const modelId = sessionModels.get(session.id)?.model ?? currentAgent()?.options?.model
       return [
         `router-mode=${routerMode} (standard=RL接口还原 / spec=深度思考优先)`,
         `mode=${fmtMode(mode)} (band=${bandFor(mode)})`,
@@ -268,8 +352,10 @@ export function apply(ctx, config) {
       if (parsed === null || parsed === 'auto') return `invalid mode "${args.mode}"`
       const session = currentSession()
       const agent = session === undefined ? undefined : [...agents.values()].find((a) => a.session === session)
-      if (agent === undefined || agent.options === undefined) return 'no agent route available'
-      const { provider, model } = agent.options
+      if (agent === undefined) return 'no agent route available'
+      const selectedModel = sessionModels.get(session.id)
+      const provider = selectedModel?.provider ?? agent.options?.provider
+      const model = selectedModel?.model ?? agent.options?.model
       if (!provider || !model) return 'agent route missing provider/model'
 
       const persona = personaFor(parsed, model)
