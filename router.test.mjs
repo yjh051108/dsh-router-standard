@@ -4,7 +4,7 @@ import test from 'node:test'
 import {
   classifyTask, personaFor, coreFor, bandFor, testinessFor, parseMode, applyPersona,
   isFlashModel, extractText, sessionMode,
-} from './preset/router-core.mjs'
+} from './preset/router-standard/router-core.mjs'
 
 test('react: greenfield/build tasks map to react band', () => {
   assert.equal(bandFor(classifyTask('需要本地开发一个马里奥网页小游戏，参考经典原版')), 'react')
@@ -124,4 +124,70 @@ test('applyPersona replaces only the persona section (keeps plan-mode)', () => {
 test('applyPersona tolerates missing sections', () => {
   const out = applyPersona([], 'p')
   assert.deepEqual(out, [{ name: 'router-persona', text: 'p', order: 0 }])
+})
+
+
+// ── plugin-level regression: contexts behavior across promotion (issue #7) ──
+// v0.2.0 moved the bootstrap into preset/<mode>/router-bootstrap-v1.mjs. The
+// promoted branch used to return `contexts: []`, permanently dropping the
+// runtime-context snapshot (file policy / approval policy) after promotion.
+
+import { apply } from './preset/router-standard/router-bootstrap-v1.mjs'
+
+function makeHarness(config = {}) {
+  const listeners = {}
+  const ctx = {
+    on(event, fn) { (listeners[event] ??= []).push(fn) },
+    effect(fn) { fn() },
+    get() { return undefined },
+    llm: {},
+    tools: { register() {} },
+  }
+  apply(ctx, config)
+  return listeners
+}
+
+const ASSEMBLED = {
+  sections: [{ name: 'persona', text: 'old persona' }],
+  tools: [
+    { name: 'bash' }, { name: 'read' }, { name: 'write' }, { name: 'edit' },
+    { name: 'glob' }, { name: 'grep' }, { name: 'str_replace_editor' }, { name: 'web' },
+  ],
+  contexts: [
+    { name: 'sandbox:policy', text: 'Current DSH file policy: workspace-write.' },
+    { name: 'approval:policy', text: 'Approval policy: ask.' },
+  ],
+}
+
+async function assemble(events, config) {
+  const listeners = makeHarness(config)
+  const agent = {
+    session: { id: 's-contexts', events },
+    options: { model: 'deepseek-v4-pro' },
+  }
+  return listeners['system-prompt/assemble'][0]({}, { agent }, async () => ASSEMBLED)
+}
+
+const FIRST_USER = {
+  type: 'user/message',
+  data: { kind: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: '修复这个仓库里的 bug' }] },
+}
+
+test('spec mode first assembly clears runtime contexts and uses the legacy core', async () => {
+  const out = await assemble([FIRST_USER], { routerMode: 'spec' })
+  assert.deepEqual(out.contexts, [])
+  assert.deepEqual(out.tools.map((t) => t.name).sort(), ['bash', 'edit', 'glob', 'grep', 'read'])
+})
+
+test('standard mode first assembly exposes the RL two-tool surface', async () => {
+  const out = await assemble([FIRST_USER], { routerMode: 'standard' })
+  assert.deepEqual(out.contexts, [])
+  assert.deepEqual(out.tools.map((t) => t.name).sort(), ['bash', 'str_replace_editor'])
+})
+
+test('promoted assembly keeps runtime contexts (issue #7)', async () => {
+  const out = await assemble([FIRST_USER, { type: 'tool/call' }], { routerMode: 'spec' })
+  assert.deepEqual(out.contexts, ASSEMBLED.contexts)
+  // promoted: full catalog exposed
+  assert.equal(out.tools.length, ASSEMBLED.tools.length)
 })

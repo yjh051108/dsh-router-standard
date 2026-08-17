@@ -64,7 +64,7 @@ export function apply(ctx, config) {
     const sections = applyPersona(assembled.sections, persona)
 
     if (session.events.some((event) => event.type === 'tool/call')) {
-      return { ...assembled, sections, contexts: [] } // promoted: full catalog
+      return { ...assembled, sections } // promoted: full catalog, contexts restored
     }
 
     const core = new Set(coreFor(mode))
