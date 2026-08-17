@@ -1,10 +1,12 @@
 /** Router classifier + continuous mode tests. */
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import { readdirSync, readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import {
   classifyTask, personaFor, coreFor, bandFor, testinessFor, parseMode, applyPersona,
   isFlashModel, extractText, sessionMode,
-} from './preset/router-core.mjs'
+} from './preset/router-standard/router-core.mjs'
 
 test('react: greenfield/build tasks map to react band', () => {
   assert.equal(bandFor(classifyTask('需要本地开发一个马里奥网页小游戏，参考经典原版')), 'react')
@@ -124,4 +126,29 @@ test('applyPersona replaces only the persona section (keeps plan-mode)', () => {
 test('applyPersona tolerates missing sections', () => {
   const out = applyPersona([], 'p')
   assert.deepEqual(out, [{ name: 'router-persona', text: 'p', order: 0 }])
+})
+
+test('preset.yml metadata stays YAML-safe (no unquoted ": " in plain scalars)', () => {
+  // dsh reads preset.yml with a YAML loader; an unquoted plain scalar containing
+  // ": " (e.g. "restoration: one-sentence") fails to parse and the preset picker
+  // falls back to the id — keep such values quoted, and close any opened quote.
+  const presetRoot = join(import.meta.dirname, 'preset')
+  for (const entry of readdirSync(presetRoot, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const file = join(presetRoot, entry.name, 'preset.yml')
+    const lines = readFileSync(file, 'utf8').split(/\r?\n/)
+    assert.ok(lines.some((l) => l.startsWith('name:')), `${entry.name}/preset.yml must carry a name line`)
+    assert.ok(lines.some((l) => l.startsWith('description:')), `${entry.name}/preset.yml must carry a description line`)
+    for (const line of lines) {
+      const match = line.match(/^([A-Za-z][A-Za-z0-9_-]*):\s*(.+)$/)
+      if (match === null) continue
+      const [, key, value] = match
+      if (value.startsWith('"') || value.startsWith("'")) {
+        const close = value[0]
+        assert.ok(value.endsWith(close), `${entry.name} ${key} value opens ${close} but never closes it`)
+      } else {
+        assert.ok(!value.includes(': '), `${entry.name} unquoted ${key} value must not contain ": "`)
+      }
+    }
+  }
 })

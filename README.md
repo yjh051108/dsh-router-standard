@@ -144,14 +144,13 @@ keywords):
 ## Tests
 
 ```sh
-node --test router.test.mjs   # 11 tests: classification, bands, personas, plan-section survival
+node --test router.test.mjs   # 16 tests: classification, bands, personas, plan-section survival, preset metadata YAML-safety
 ```
 
 ## Files
 
-- `preset/agent.cordis.yml` — full rc.6 Standard composition + router row
-- `preset/router-core.mjs` — pure routing logic (zero deps, unit-testable)
-- `preset/router-bootstrap.mjs` — Cordis plugin (zero external imports)
+- `preset/router-standard/` — Router Standard preset (`agent.cordis.yml` rc.6 composition + router row, `preset.yml` display metadata, `router-core.mjs` zero-dep routing logic, `router-bootstrap-v1.mjs` Cordis plugin)
+- `preset/router-spec/` — Router Spec preset (same layout)
 - `router.test.mjs` — unit tests
 - `docs/paper.md` — the theory + experiments write-up
 - `docs/experiments.md` — full data tables
@@ -171,5 +170,5 @@ node --test router.test.mjs   # 11 tests: classification, bands, personas, plan-
 
 ## License
 
-MIT. `preset/agent.cordis.yml` derives from the DeepSeek Harness Standard
-preset (MIT); original attribution in `NOTICE`.
+MIT. `preset/router-standard/agent.cordis.yml` and `preset/router-spec/agent.cordis.yml`
+derive from the DeepSeek Harness Standard preset (MIT); original attribution in `NOTICE`.
