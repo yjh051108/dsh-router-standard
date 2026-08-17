@@ -13,6 +13,30 @@
 >
 > 📄 完整勘误声明：[docs/statement.md](docs/statement.md) ｜ 道歉函：[docs/apology.md](docs/apology.md)
 
+> **一句话**：把“首轮该用哪种人格和工具”这件事自动化——按第一条用户消息判断任务类型，锁定一个稳定行为带；第一次工具调用后恢复 Standard 全量能力。
+
+## 两个预设是做什么的
+
+| 预设 | 首轮行为（路径锁定前） | 第一次工具调用后 | 适合 |
+|---|---|---|---|
+| **Router Standard（标准接口，默认）** | 只保留 RL 训练句 + `shell` / `str_replace_editor`；想一段、做一段（实测 25 步 / 24 次工具调用 / 产出文件） | 开放 Standard 全部工具，路由不再干预 | 大多数日常任务 |
+| **Router Spec（深度思考优先）** | 按任务分类注入 spec / react / weak 人格 + 对应首轮核心工具，并保留完整系统提示区；首轮超长思维链（101K 推理、0 行动）是设计特性 | 同上 | 维护、排查、需要先想清楚再动手的任务 |
+
+两个预设都会按第一条消息做 **build / fix / 模糊** 三分类（build → react 执行带，fix → spec 规划带，模糊 → weak 模型自判）。Router Spec 把分类结果直接用于首轮人格和工具；Router Standard 首轮统一走 RL 接口，分类仍驱动模糊任务的后续引导，并体现在 `dev_router_status` 里。模式来自持久化会话事件，断线 / 重载不丢失。
+
+## 与 DSH 自带预设的对比（Pro / Flash）
+
+| 预设 | 首轮系统提示与工具 | V4 Pro 实测 | V4 Flash 实测 | 任务分流 |
+|---|---|---|---|---|
+| **DSH 标准模式** | 完整提示 + 全量工具 | 维护类 91 分（对比 minimal 99/96）；工具目录与控制面板敏感，易出现 let-me 尖峰 | 对工具目录几乎免疫，人格主导，无 let-me 尖峰 | 无 |
+| **DSH 极简模式** | exact RL 句 + `bash` / `str_replace_editor`，且永远只有这两个工具 | 维护类 99/96 分；但没有自动升级路径 | 即使给全量工具目录仍保持 minimal-like | 无 |
+| **Router Standard** | RL 句 + `shell` / `str_replace_editor`（首轮后自动升级） | 所有任务首轮统一走 think-act 接口（实测 25 步 / 24 工具调用）；分类只驱动 weak 引导与状态可见性 | 模糊任务自动使用 Flash 专属 weak 人格（w7 + 召回/收敛/防跑飞锚点） | 有（用于 weak 引导） |
+| **Router Spec** | 完整提示 + 分类人格 + 对应首轮核心工具 | 维护 → 深度 spec，构建 → react；首轮超长思维链是特性 | 与 Pro 同套分流；模糊任务走 Flash 专属 weak 人格 | 有 |
+
+**模型自适应，不用为 Pro / Flash 手配两套**：`personaFor(mode, modelId)` 读取当前模型路由，Pro 用实测最优 w6c（spec 句 + 分类指令，24/24 = 100% 分流），Flash 用 w7 + 召回 / 收敛 / 防跑飞锚点（96% 分流、100% 单任务完成）。
+
+---
+
 **Task-aware reasoning-mode router for DeepSeek Harness.** One preset, two
 **routing modes** (v0.2.0 naming), plus the measured three-band axis behind them:
 

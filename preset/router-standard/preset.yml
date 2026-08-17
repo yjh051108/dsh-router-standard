@@ -1,2 +1,2 @@
 name: Router Standard (experimental)
-description: Task-aware routing — RL-interface restoration: one-sentence persona + shell/editor surface; think-act feedback loops. Full Standard tools after the first tool call.
+description: 任务感知路由（标准接口）：按第一条消息自动在“规划优先 / 执行优先 / 模型自判”三种模式间分流，起步只给 shell + 编辑器的最小接口，第一次工具调用后开放标准模式全部工具。
