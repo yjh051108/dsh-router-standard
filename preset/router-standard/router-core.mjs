@@ -148,7 +148,10 @@ export function classifyTask(text) {
 /** Per-session mode derived from durable events (resume-safe). */
 export function sessionMode(session) {
   const events = session.events
-  const userMsg = events.find((e) => e.type === 'user/message')
+  // Only REAL user messages classify the task: plugin-injected messages
+  // (user-approval policy changes, router guidance, ingest seeds) carry
+  // source.kind !== 'user' and would otherwise pin the session weak.
+  const userMsg = events.find((e) => e.type === 'user/message' && e.data?.source?.kind === 'user')
   return classifyTask(extractText(userMsg?.data))
 }
 

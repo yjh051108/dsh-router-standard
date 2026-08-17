@@ -20,7 +20,7 @@
  */
 
 import {
-  applyPersona, bandFor, bandOf, coreFor, parseMode, personaFor, sessionMode, testinessFor, clamp01,
+  applyPersona, bandFor, bandOf, classifyTask, coreFor, extractText, parseMode, personaFor, sessionMode, testinessFor, clamp01,
   isComplexTask,
 } from './router-core.mjs'
 
@@ -50,6 +50,17 @@ export function apply(ctx, config) {
   const firstUserText = new Map() // session id -> first REAL user message text (issue #3 fix)
   const ptcSwitched = new Map() // session id -> code-mode presentation switched (PTC two-phase)
 
+  /**
+   * First real user text, CLASSIFIED. Never return the raw text as a mode:
+   * bandOf() clamps non-numeric strings through `Number(v) || 0` → 0, so a
+   * raw task string silently routed EVERY task to the spec band (the
+   * "everything routes spec" regression of the claimed-event fix).
+   */
+  function firstMode(session) {
+    const text = firstUserText.get(session.id)
+    return text === undefined ? undefined : classifyTask(text)
+  }
+
   // ── 路由模式（v0.2.0 命名，用户定义）───────────────────────────────────────
   // standard（默认，新）: RL 接口还原——首轮只有 RL 训练句 + shell/str_replace_editor，
   //   模型"想一段、做一段"（实测 25 步 / 24 工具调用 / 产出文件）。
@@ -78,7 +89,7 @@ export function apply(ctx, config) {
     // and injected the WEAK band on the path-committing first request. Use the
     // live text captured by the session/event listener (or inbox pending) so
     // the first request carries the REAL classification.
-    const mode = overrides.get(session.id) ?? firstUserText.get(session.id) ?? sessionMode(session)
+    const mode = overrides.get(session.id) ?? firstMode(session) ?? sessionMode(session)
     const modelId = agent.options?.model
 
     // ── 模式分派 ──
@@ -180,7 +191,7 @@ export function apply(ctx, config) {
     const agent = ctx.get('agent')
     const target = agent !== undefined && agent.session === session ? agent : [...agents.values()].find((a) => a.session === session)
     if (target === undefined || target.inbox === undefined) return
-    const mode = overrides.get(session.id) ?? firstUserText.get(session.id) ?? sessionMode(session)
+    const mode = overrides.get(session.id) ?? firstMode(session) ?? sessionMode(session)
     if (bandOf(mode) !== 'weak') return // strong modes need no guidance
     if (!text.trim()) return
     const guide = isComplexTask(text) ? GUIDE_DEEP : GUIDE_WEAK
@@ -192,6 +203,26 @@ export function apply(ctx, config) {
         content: [{ type: 'text', text: guide }],
       })
     } catch { /* duplicate/ordering races: skip */ }
+  })
+
+  // ── issue #13 real fix: first-turn routing ───────────────────────────────
+  // The session/event 'user/message' firehose fires only AFTER the first
+  // assembly (the agent loop appends the message to the session at step
+  // start), so a listener on it alone still routes the FIRST request to
+  // weak. The guaranteed-before-assemble hook is `agent/inbox/claimed`:
+  // the loop claims the inbox BEFORE assembling the system prompt
+  // (preStep: inbox.claim → systemPrompt.assemble), and the claimed event
+  // carries the raw message — so the first request already sees the REAL
+  // classification. Filter source.kind === 'user' to ignore plugin-injected
+  // steering (user-approval etc.) that would otherwise pin the session weak.
+  ctx.on('agent/inbox/claimed', ({ agent, message }) => {
+    if (message?.source?.kind !== 'user') return
+    const text = extractText(message)
+    if (!text.trim()) return
+    const session = agent?.session
+    if (session !== undefined && !firstUserText.has(session.id)) {
+      firstUserText.set(session.id, text.trim())
+    }
   })
 
   // ── router visibility & tuning (agent self-optimization) ────────────────
