@@ -144,6 +144,42 @@ export function apply(ctx, config) {
     }
   })
 
+  // ── bootstrap context strip (port of dsh-anchored-standard's
+  //    suppressedContextSources pre-step filter) ─────────────────────────────
+  // dsh-agent-instructions and dsh-tool-skill inject the AGENTS.md digest and
+  // the skill catalog as user messages before the first request. 'contexts:
+  // []' above only strips the contexts channel — these are user messages, so
+  // in workspaces carrying AGENTS.md the "clean RL first request" premise
+  // breaks: measured live, the first request grows by ~5.7K input tokens and
+  // the we-trajectory anchor does not survive the catalog on V4 Flash (the
+  // same observation as dsh-anchored-standard issue #6: 0/9 anchored with the
+  // catalog present). Hold both auto-injected reminder kinds back until the
+  // first durable tool/call promotes the session; the messages stay
+  // persisted, so they flow back into every later window on their own —
+  // restore needs no code. `prepend: true` keeps this strip the OUTERMOST
+  // pre-step transform (row application is concurrent; row order alone does
+  // not decide listener order), so it removes what the injector listeners
+  // add. The injector plugins stay mounted (their tools belong to the
+  // promoted catalog); user-initiated skill gestures are not in the set.
+  ctx.on('agent/pre-step', async ({ agent }, next) => {
+    // Downstream errors propagate untouched; only this filter's own logic is guarded.
+    const decision = await next()
+    if (decision.kind === 'reject') return decision
+    try {
+      const session = agent?.session
+      if (session === undefined || !Array.isArray(decision.messages)) return decision
+      if (session.events?.some((event) => event.type === 'tool/call')) return decision
+      const kept = decision.messages.filter((message) => {
+        const kind = message?.source?.kind
+        return kind !== 'agent-instructions' && kind !== 'skill-catalog'
+      })
+      return kept.length === decision.messages.length ? decision : { ...decision, messages: kept }
+    } catch {
+      // A filter bug must never eat context: degrade to keeping every message.
+      return decision
+    }
+  }, { prepend: true })
+
   // ── near-field routing guidance for weak mode (P14/P16/P17/P19/P20) ─────
   // Every REAL user message in a weak-mode session gets ONE fixed guidance
   // message appended to the inbox right after it (near field, cache-neutral).
