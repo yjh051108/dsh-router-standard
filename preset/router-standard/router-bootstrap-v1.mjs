@@ -21,7 +21,7 @@
 
 import {
   applyPersona, bandFor, bandOf, coreFor, parseMode, personaFor, sessionMode, testinessFor, clamp01,
-  isComplexTask,
+  isComplexTask, extractText, classifyTask,
 } from './router-core.mjs'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -77,7 +77,7 @@ export function apply(ctx, config) {
     // and injected the WEAK band on the path-committing first request. Use the
     // live text captured by the session/event listener (or inbox pending) so
     // the first request carries the REAL classification.
-    const mode = overrides.get(session.id) ?? firstUserText.get(session.id) ?? sessionMode(session)
+    const mode = overrides.get(session.id) ?? (firstUserText.has(session.id) ? classifyTask(firstUserText.get(session.id)) : undefined) ?? sessionMode(session)
     const modelId = agent.options?.model
 
     // ── 模式分派 ──
@@ -133,29 +133,38 @@ export function apply(ctx, config) {
   const GUIDE_DEEP =
     '\nRouter: classify this task (build or fix) now, then adopt the matching style — build: direct production; fix: inspect-first. Think deeply about the architecture, edge cases, and integration points. Do not spend reasoning on the environment or tooling. Produce when your information is complete. End each reasoning block with a decision or an information need.'
 
-  ctx.on('session/event', (session, event) => {
-    if (event.type !== 'user/message') return
-    const data = event.data ?? {}
-    if (data.source?.kind !== 'user') return // only real user messages
-    const text = extractText(data)
-    if (!firstUserText.has(session.id) && text.trim()) {
-      firstUserText.set(session.id, text.trim()) // issue #3: capture BEFORE assembly
+  // ── 近距离引导（rc.6 兼容修复，2026-08-17 本地补丁）────────────────────
+  // 原实现监听 session/event（rc.5 语义）。rc.6 的 session/event 只在会话载体
+  // ctx 链发射，预设 standing scope（agent → preset → global 链）收不到任何
+  // 会话事件，导致引导从未注入（3a 实测 8/8 会话缺失，且 extractText 未导入的
+  // ReferenceError 因此从未暴露）。改用 agent/pre-step：agent 链瀑布事件，载荷
+  // 自带 agent + 本步 claimed messages；对包含真实用户消息的步，把引导 append
+  // 到 next-step inbox，由下一步边界 claim——与"用户消息后注入、下一步请求前
+  // 可见"的近距离、缓存中性语义一致。
+  const guidedUserMessages = new Set() // user message id -> 已注入，防重复
+  ctx.on('agent/pre-step', async ({ agent, messages }, next) => {
+    const decision = await next()
+    if (agent === undefined || agent.session === undefined || agent.inbox === undefined) return decision
+    const userMsg = messages.find((m) => m.role === 'user' && m.source?.kind === 'user')
+    if (userMsg === undefined) return decision
+    const text = extractText(userMsg)
+    if (!firstUserText.has(agent.session.id) && text.trim()) {
+      firstUserText.set(agent.session.id, text.trim()) // issue #3: capture BEFORE assembly
     }
-    const agent = ctx.get('agent')
-    const target = agent !== undefined && agent.session === session ? agent : [...agents.values()].find((a) => a.session === session)
-    if (target === undefined || target.inbox === undefined) return
-    const mode = overrides.get(session.id) ?? firstUserText.get(session.id) ?? sessionMode(session)
-    if (bandOf(mode) !== 'weak') return // strong modes need no guidance
-    if (!text.trim()) return
+    const mode = overrides.get(agent.session.id) ?? (firstUserText.has(agent.session.id) ? classifyTask(firstUserText.get(agent.session.id)) : undefined) ?? sessionMode(agent.session)
+    if (bandOf(mode) !== 'weak') return decision // strong modes need no guidance
+    if (!text.trim() || guidedUserMessages.has(userMsg.id)) return decision
+    guidedUserMessages.add(userMsg.id)
     const guide = isComplexTask(text) ? GUIDE_DEEP : GUIDE_WEAK
     try {
-      target.inbox.append('next-step', {
+      agent.inbox.append('next-step', {
         id: `router-guide-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
         role: 'user',
         source: { kind: 'plugin', plugin: 'router-bootstrap' },
         content: [{ type: 'text', text: guide }],
       })
     } catch { /* duplicate/ordering races: skip */ }
+    return decision
   })
 
   // ── router visibility & tuning (agent self-optimization) ────────────────
