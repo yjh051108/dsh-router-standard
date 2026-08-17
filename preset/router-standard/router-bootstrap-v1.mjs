@@ -102,7 +102,11 @@ export function apply(ctx, config) {
     }
 
     if (session.events.some((event) => event.type === 'tool/call')) {
-      return { ...assembled, sections, contexts: [] } // promoted: full catalog
+      // Promoted: the router stops touching the prompt (agent.cordis.yml /
+      // README contract). Restore the FULL section set that the first-turn
+      // RL surface stripped — agent-instructions (AGENTS.md) and friends
+      // come back — and keep only the context list cleared.
+      return { ...assembled, contexts: [] }
     }
 
     const available = new Set(assembled.tools.map((tool) => tool.name))

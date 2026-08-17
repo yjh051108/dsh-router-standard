@@ -11,10 +11,11 @@
     "README.md",
     "LICENSE",
     "NOTICE",
-    "router.test.mjs"
+    "router.test.mjs",
+    "router-bootstrap.test.mjs"
   ],
   "scripts": {
-    "test": "node --test router.test.mjs",
+    "test": "node --test router.test.mjs router-bootstrap.test.mjs",
     "probe": "node probe/matrix.mjs"
   },
   "engines": { "node": ">=22" }
