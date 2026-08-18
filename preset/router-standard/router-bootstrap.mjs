@@ -20,8 +20,7 @@
  */
 
 import {
-  applyPersona, bandFor, coreFor, parseMode, personaFor, sessionMode, testinessFor, clamp01,
-  isComplexTask,
+
 } from './router-core.mjs'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -55,15 +54,13 @@ export function apply(ctx, config) {
     const session = agent.session
     agents.set(session.id, agent)
 
-    const mode = overrides.get(session.id) ?? sessionMode(session)
+
     const modelId = agent.options?.model
     const persona = personaFor(mode, modelId)
 
-    // The persona stays constant for the whole session (mode is fixed); only
-    // the tool surface changes once, after the first durable tool/call.
-    const sections = applyPersona(assembled.sections, persona)
 
-    if (session.events.some((event) => event.type === 'tool/call')) {
+
+    if (isPromoted) {
       return { ...assembled, sections, contexts: [] } // promoted: full catalog
     }
 
@@ -91,8 +88,10 @@ export function apply(ctx, config) {
   // driven stop signal). The persona carries no hard converge anchor
   // (P27: information-driven convergence beats step-driven; user feedback:
   // flash was over-confident / too shallow on complex tasks).
-  const GUIDE_WEAK =
-    '\nRouter: classify this task (build or fix) now, then adopt the matching style — build: direct production; fix: inspect-first. Think deeply first, then commit and act.'
+  const GUIDE_BASE =
+    '\nRouter: classify this task (build or fix) now, then adopt the matching style — build: direct production; fix: inspect-first. Think deeply first, then act.'
+  const GUIDE_COMMIT =
+    '\nRouter: this is a new round. Re-classify this task (build or fix) now, then adopt the matching style — build: direct production; fix: inspect-first. Think deeply first, then commit and act.'
   const GUIDE_DEEP =
     '\nRouter: classify this task (build or fix) now, then adopt the matching style — build: direct production; fix: inspect-first. Think deeply about the architecture, edge cases, and integration points. Do not spend reasoning on the environment or tooling. Produce when your information is complete. End each reasoning block with a decision or an information need.'
 
@@ -103,11 +102,19 @@ export function apply(ctx, config) {
     const agent = ctx.get('agent')
     const target = agent !== undefined && agent.session === session ? agent : [...agents.values()].find((a) => a.session === session)
     if (target === undefined || target.inbox === undefined) return
-    const mode = overrides.get(session.id) ?? sessionMode(session)
+
     if (bandOf(mode) !== 'weak') return // strong modes need no guidance
     const text = extractText(data)
     if (!text.trim()) return
-    const guide = isComplexTask(text) ? GUIDE_DEEP : GUIDE_WEAK
+
+    const userEvents = session.events.filter(e => e.type === 'user/message' && e.data?.source?.kind === 'user')
+    const hasCurrent = userEvents.some(e => e.id === event.id || (e.data?.id && e.data.id === event.data?.id))
+    const round = userEvents.length + (hasCurrent ? 0 : 1)
+
+    const guide = isComplexTask(text)
+      ? GUIDE_DEEP
+      : (round >= 3 ? GUIDE_COMMIT : GUIDE_BASE)
+
     try {
       target.inbox.append('next-step', {
         id: `router-guide-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,

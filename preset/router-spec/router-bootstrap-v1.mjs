@@ -21,7 +21,7 @@
 
 import {
   applyPersona, bandFor, bandOf, coreFor, parseMode, personaFor, sessionMode, testinessFor, clamp01,
-  isComplexTask,
+  isComplexTask, extractText, classifyTask,
 } from './router-core.mjs'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -77,7 +77,8 @@ export function apply(ctx, config) {
     // and injected the WEAK band on the path-committing first request. Use the
     // live text captured by the session/event listener (or inbox pending) so
     // the first request carries the REAL classification.
-    const mode = overrides.get(session.id) ?? firstUserText.get(session.id) ?? sessionMode(session)
+    const rawText = firstUserText.get(session.id)
+    const mode = overrides.get(session.id) ?? (rawText !== undefined ? classifyTask(rawText) : sessionMode(session))
     const modelId = agent.options?.model
 
     // ── 模式分派 ──
@@ -85,23 +86,29 @@ export function apply(ctx, config) {
     // 规则 sections 全部移除（minimal 的 complete:true 语义，实测 46 字符 system →
     // 25 步迭代工作流）。
     // spec（深度思考优先）: 分类 persona + 保留全部 sections（首轮超长思维链是特征）。
+    const isPromoted = session.events.some((event) => event.type === 'tool/call' || event.type === 'assistant/message')
+    const persona = personaFor(mode, modelId)
     const planSection = (assembled.sections || []).find((s) => /plan/i.test(s.name))
+
     let sections
     let core
-    let persona
     if (routerMode === 'standard') {
-      persona = RL_PERSONA
-      sections = planSection
-        ? [planSection, { name: 'router-persona', text: persona, order: 0 }]
-        : [{ name: 'router-persona', text: persona, order: 0 }]
-      core = new Set(['str_replace_editor']) // RL shape: shell + editor
+      if (isPromoted) {
+        sections = applyPersona(assembled.sections, persona)
+      } else {
+        sections = planSection
+          ? [planSection, { name: 'router-persona', text: persona, order: 0 }]
+          : [{ name: 'router-persona', text: persona, order: 0 }]
+        core = new Set(['str_replace_editor']) // RL shape: shell + editor
+      }
     } else {
-      persona = personaFor(mode, modelId)
-      sections = applyPersona(assembled.sections, persona) // keep all other sections
-      core = new Set(legacyCore(mode))
+      sections = applyPersona(assembled.sections, persona)
+      if (!isPromoted) {
+        core = new Set(legacyCore(mode))
+      }
     }
 
-    if (session.events.some((event) => event.type === 'tool/call')) {
+    if (isPromoted) {
       return { ...assembled, sections, contexts: [] } // promoted: full catalog
     }
 
@@ -128,8 +135,10 @@ export function apply(ctx, config) {
   // driven stop signal). The persona carries no hard converge anchor
   // (P27: information-driven convergence beats step-driven; user feedback:
   // flash was over-confident / too shallow on complex tasks).
-  const GUIDE_WEAK =
-    '\nRouter: classify this task (build or fix) now, then adopt the matching style — build: direct production; fix: inspect-first. Think deeply first, then commit and act.'
+  const GUIDE_BASE =
+    '\nRouter: classify this task (build or fix) now, then adopt the matching style — build: direct production; fix: inspect-first. Think deeply first, then act.'
+  const GUIDE_COMMIT =
+    '\nRouter: this is a new round. Re-classify this task (build or fix) now, then adopt the matching style — build: direct production; fix: inspect-first. Think deeply first, then commit and act.'
   const GUIDE_DEEP =
     '\nRouter: classify this task (build or fix) now, then adopt the matching style — build: direct production; fix: inspect-first. Think deeply about the architecture, edge cases, and integration points. Do not spend reasoning on the environment or tooling. Produce when your information is complete. End each reasoning block with a decision or an information need.'
 
@@ -144,10 +153,19 @@ export function apply(ctx, config) {
     const agent = ctx.get('agent')
     const target = agent !== undefined && agent.session === session ? agent : [...agents.values()].find((a) => a.session === session)
     if (target === undefined || target.inbox === undefined) return
-    const mode = overrides.get(session.id) ?? firstUserText.get(session.id) ?? sessionMode(session)
+    const rawText = firstUserText.get(session.id)
+    const mode = overrides.get(session.id) ?? (rawText !== undefined ? classifyTask(rawText) : sessionMode(session))
     if (bandOf(mode) !== 'weak') return // strong modes need no guidance
     if (!text.trim()) return
-    const guide = isComplexTask(text) ? GUIDE_DEEP : GUIDE_WEAK
+
+    const userEvents = session.events.filter(e => e.type === 'user/message' && e.data?.source?.kind === 'user')
+    const hasCurrent = userEvents.some(e => e.id === event.id || (e.data?.id && e.data.id === event.data?.id))
+    const round = userEvents.length + (hasCurrent ? 0 : 1)
+
+    const guide = isComplexTask(text)
+      ? GUIDE_DEEP
+      : (round >= 3 ? GUIDE_COMMIT : GUIDE_BASE)
+
     try {
       target.inbox.append('next-step', {
         id: `router-guide-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
