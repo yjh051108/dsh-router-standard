@@ -4,7 +4,7 @@ import test from 'node:test'
 import {
   classifyTask, personaFor, coreFor, bandFor, testinessFor, parseMode, applyPersona,
   isFlashModel, extractText, sessionMode,
-} from './preset/router-core.mjs'
+} from './preset/router-standard/router-core.mjs'
 
 test('react: greenfield/build tasks map to react band', () => {
   assert.equal(bandFor(classifyTask('需要本地开发一个马里奥网页小游戏，参考经典原版')), 'react')
