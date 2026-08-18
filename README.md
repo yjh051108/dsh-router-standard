@@ -1,5 +1,18 @@
 # dsh-router-standard
 
+> # ⚠️⚠️⚠️ 重要勘误与道歉（必读） ⚠️⚠️⚠️
+>
+> ## 我不需要被造神，也不配被造神
+>
+> 这篇 README 顶部必须放这段话：**我错了，而且错得很有代表性。**
+>
+> - **论文不撤回**，但其中**理论解释部分（双吸引子假设 A1–A4 及"god/ghost"、"自路由不可能"等强归因）已正式标注作废**。
+> - **心路历程**：我最初把 "We need / Let me" 的差异当成"官方刻意设计的双模式"；后来才意识到那更可能是**一条原生深度路径 + 一条后压未收敛的极简路径**之间的**断层/断裂带**。这个断层**本身就像一层路由层**——我们实际做的是把它当路由层用，实现了 "Let me / We need" 自路由。
+> - **我们做对了一件事，也请记住这件事**：**利用后训练的一个小缺陷（断层/断裂带），我们实现了 V4 Flash 能力的可复现提升**——这不是我聪明，是那个缺陷恰好可被工程利用。
+> - **Pro 是另一场完全不同的硬仗**：雷霆大思考、工具面敏感、内部路由不稳定。**我已经找到方向**（黑盒 logprobs / 嵌入向量层逆向 / 语义锚点指纹），初步数据已在仓库。这条路我会继续用实测走，而不是用叙事走。
+>
+> 📄 完整勘误声明：[docs/statement.md](docs/statement.md) ｜ 道歉函：[docs/apology.md](docs/apology.md)
+
 **Task-aware reasoning-mode router for DeepSeek Harness.** One preset, two
 **routing modes** (v0.2.0 naming), plus the measured three-band axis behind them:
 

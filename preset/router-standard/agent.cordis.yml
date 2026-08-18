@@ -47,17 +47,9 @@
 # Task-aware reasoning-mode router: classifies the first user message and
 # injects the matching persona + first-turn core tool set; after the first
 # durable tool/call, exposes the full Standard catalog.
-#
-# routerMode (v0.2.0):
-#   standard (default) — RL 接口还原: first request carries ONLY the RL training
-#     sentence + shell/str_replace_editor; model works in think-act feedback
-#     loops (measured: 25 steps / 24 tool calls in a real session).
-#   spec — 深度思考优先: classified persona + full prompt sections; the long
-#     first-turn reasoning chain (101K chars) is a feature, not a defect.
 - id: router-bootstrap
-  name: ./router-bootstrap-v1.mjs
-  config:
-    routerMode: standard
+  name: ./router-bootstrap.mjs
+  config: {}
 
 # ── shell ───────────────────────────────────────────────────────────────────
 
@@ -87,18 +79,6 @@
   name: '@deepseek-ai/dsh-tool-fs-search'
   config:
     sampleOverCapGlobResults: false
-
-# ── RL-shape editor (v0.2.0 interface restoration) ─────────────────────────
-#
-# The RL training interface uses persistent bash + str_replace_editor (the
-# minimal preset's two-tool surface). The WEAK (Flash) band's first-turn core
-# tool set is shell + this editor — the RL shape — because the measured
-# interface-restoration result (2026-08-15, official API, n=2) is 100% tool
-# calls at 18–29K reasoning chars vs ~25% action / 73–101K under the
-# read/write/edit surface. The editor is only visible in the first turn of a
-# weak-band session; after the first durable tool/call the full catalog opens.
-- id: tool-str-replace-editor
-  name: '@deepseek-ai/dsh-tool-str-replace-editor'
 
 # ── background jobs ────────────────────────────────────────────────────────
 
@@ -288,4 +268,3 @@
   config:
     fetch: false
     searchTimeoutMs: 60000
-

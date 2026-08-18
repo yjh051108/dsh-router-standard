@@ -20,7 +20,8 @@
  */
 
 import {
-
+  applyPersona, bandFor, bandOf, coreFor, parseMode, personaFor, sessionMode, testinessFor, clamp01,
+  isComplexTask,
 } from './router-core.mjs'
 
 /** Cordis plugin name used by loader diagnostics. */
@@ -46,6 +47,24 @@ function toJsonSchema(spec) {
 export function apply(ctx, config) {
   const overrides = new Map() // session id -> explicit mode (number 0..1)
   const agents = new Map() // session id -> Agent (live handle, in-process only)
+  const firstUserText = new Map() // session id -> first REAL user message text (issue #3 fix)
+  const ptcSwitched = new Map() // session id -> code-mode presentation switched (PTC two-phase)
+
+  // ── 路由模式（v0.2.0 命名，用户定义）───────────────────────────────────────
+  // standard（默认，新）: RL 接口还原——首轮只有 RL 训练句 + shell/str_replace_editor，
+  //   模型"想一段、做一段"（实测 25 步 / 24 工具调用 / 产出文件）。
+  // spec（旧）: 深度思考优先——分类 persona（w7/REACT/SPEC）+ 保留全部 sections，
+  //   模型首轮长思维链（101K 推理 0 行动是其特征，不是缺陷）。
+  const routerMode = config.routerMode === 'spec' ? 'spec' : 'standard'
+  const RL_PERSONA = 'You are a helpful software engineer assistant.'
+
+  /** spec 路由模式的首轮工具面（旧行为；weak 也走 default 面）。 */
+  function legacyCore(mode) {
+    switch (bandOf(mode)) {
+      case 'spec': return ['read', 'edit', 'glob', 'grep']
+      default: return ['read', 'write', 'edit']
+    }
+  }
 
   ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
     const assembled = await next()
@@ -54,20 +73,65 @@ export function apply(ctx, config) {
     const session = agent.session
     agents.set(session.id, agent)
 
-
+    // issue #3 fix: the first assembly happens before the first user/message
+    // event lands in session.events, so sessionMode() saw an empty transcript
+    // and injected the WEAK band on the path-committing first request. Use the
+    // live text captured by the session/event listener (or inbox pending) so
+    // the first request carries the REAL classification.
+    const mode = overrides.get(session.id) ?? firstUserText.get(session.id) ?? sessionMode(session)
     const modelId = agent.options?.model
-    const persona = personaFor(mode, modelId)
 
+    // ── 模式分派 ──
+    // standard（RL 接口还原）: 首轮 system = 只有 RL 训练句；身份/Web 定位/工具引导/
+    // 规则 sections 全部移除（minimal 的 complete:true 语义，实测 46 字符 system →
+    // 25 步迭代工作流）。
+    // spec（深度思考优先）: 分类 persona + 保留全部 sections（首轮超长思维链是特征）。
+    const planSection = (assembled.sections || []).find((s) => /plan/i.test(s.name))
+    let sections
+    let core
+    let persona
+    if (routerMode === 'standard') {
+      persona = RL_PERSONA
+      // PTC 基座（v0.4）：code mode 下必须保留 tools:code-only（只有 run_code 可
+      // 调用）与 tools:sdk（生成 SDK 说明）两段，否则模型不知道 run_code 的正确
+      // 用法（实测：SDK 段被清后模型把 run_code 当 node 计算器用，不做文件操作）。
+      // 其余身份/Web/工具引导段仍清除（接口还原）。
+      const codeSections = (assembled.sections || []).filter((s) => /^tools:(code-only|sdk)$/.test(s.name))
+      sections = planSection || codeSections.length
+        ? [...codeSections, ...(planSection ? [planSection] : []), { name: 'router-persona', text: persona, order: 0 }]
+        : [{ name: 'router-persona', text: persona, order: 0 }]
+      core = new Set(['str_replace_editor']) // RL shape: shell + editor
+    } else {
+      persona = personaFor(mode, modelId)
+      sections = applyPersona(assembled.sections, persona) // keep all other sections
+      core = new Set(legacyCore(mode))
+    }
 
-
-    if (isPromoted) {
+    if (session.events.some((event) => event.type === 'tool/call')) {
+      // PTC 两阶段（v0.4）：锚定（首个 tool/call）后 wire 切换 Code Mode——
+      // 39K SDK 说明在首轮会压垮模型（实测 0 行动），native 双工具首轮建立
+      // 行动节律后再切，SDK 段从下一步 assemble 起自然出现（梁神模式同款机制）。
+      if (routerMode === 'standard' && !ptcSwitched.has(session.id)) {
+        try {
+          const toolsSvc = agent.ctx.get('tools')
+          if (toolsSvc && typeof toolsSvc.presentAs === 'function') {
+            toolsSvc.presentAs('code')
+            ptcSwitched.set(session.id, true)
+          }
+        } catch { /* presentation already declared: ignore */ }
+      }
       return { ...assembled, sections, contexts: [] } // promoted: full catalog
     }
 
-    const core = new Set(coreFor(mode))
     const available = new Set(assembled.tools.map((tool) => tool.name))
     const shell = available.has('pwsh') ? 'pwsh' : available.has('bash') ? 'bash' : null
     if (shell === null) {
+      // PTC 基座（v0.4 实验）：code mode 下模型面只有 run_code（原生 schema
+      // 全省略），没有 shell——工具面收窄无意义，直接放行（persona/sections
+      // 逻辑照常）。
+      if (available.has('run_code')) {
+        return { ...assembled, sections, contexts: [] }
+      }
       throw new Error(`${name}: no platform shell in catalog`)
     }
     core.add(shell)
@@ -88,33 +152,38 @@ export function apply(ctx, config) {
   // driven stop signal). The persona carries no hard converge anchor
   // (P27: information-driven convergence beats step-driven; user feedback:
   // flash was over-confident / too shallow on complex tasks).
-  const GUIDE_BASE =
-    '\nRouter: classify this task (build or fix) now, then adopt the matching style — build: direct production; fix: inspect-first. Think deeply first, then act.'
-  const GUIDE_COMMIT =
-    '\nRouter: this is a new round. Re-classify this task (build or fix) now, then adopt the matching style — build: direct production; fix: inspect-first. Think deeply first, then commit and act.'
+
+  // v0.4 We-Team 协议近场注入：分类 + 行动节律 + 决策节奏（专属语言）。
+  // 决策节奏（每 2-3 句一个决策句）直接对抗推理-行动失联；完整 PTC 下
+  // 行动载体是 run_code 程序（一次执行多步）。
+  const GUIDE_WEAK =
+    '\n\nWe/我们：先分类任务——build → 直接写 run_code 程序生产；fix → 先查后修。'
+    + ' 我们的节奏：每句一个动作；每 2-3 句一个决策句（We decide / 我们决定）然后继续。'
+    + ' 我们直接行动：第一句即调用 run_code 执行第一步，再按反馈推进。'
+    + ' 我们验证、我们收敛、我们交付——决策后即前进。'
   const GUIDE_DEEP =
+    '\n\nWe/我们：先分类任务——build → 直接生产；fix → 先查后修。'
+    + ' 我们深入架构、边界与集成点（不猜环境、不重复检查）。'
+    + ' 我们的节奏：每句一个动作；每 2-3 句一个决策句（We decide / 我们决定）然后继续。'
+    + ' 我们直接行动：信息足够即调用 run_code 执行，再按反馈推进。'
+    + ' 我们以决策或信息需求结束每个推理块；我们收敛、我们交付。'
     '\nRouter: classify this task (build or fix) now, then adopt the matching style — build: direct production; fix: inspect-first. Think deeply about the architecture, edge cases, and integration points. Do not spend reasoning on the environment or tooling. Produce when your information is complete. End each reasoning block with a decision or an information need.'
 
   ctx.on('session/event', (session, event) => {
     if (event.type !== 'user/message') return
     const data = event.data ?? {}
     if (data.source?.kind !== 'user') return // only real user messages
+    const text = extractText(data)
+    if (!firstUserText.has(session.id) && text.trim()) {
+      firstUserText.set(session.id, text.trim()) // issue #3: capture BEFORE assembly
+    }
     const agent = ctx.get('agent')
     const target = agent !== undefined && agent.session === session ? agent : [...agents.values()].find((a) => a.session === session)
     if (target === undefined || target.inbox === undefined) return
-
+    const mode = overrides.get(session.id) ?? firstUserText.get(session.id) ?? sessionMode(session)
     if (bandOf(mode) !== 'weak') return // strong modes need no guidance
-    const text = extractText(data)
     if (!text.trim()) return
-
-    const userEvents = session.events.filter(e => e.type === 'user/message' && e.data?.source?.kind === 'user')
-    const hasCurrent = userEvents.some(e => e.id === event.id || (e.data?.id && e.data.id === event.data?.id))
-    const round = userEvents.length + (hasCurrent ? 0 : 1)
-
-    const guide = isComplexTask(text)
-      ? GUIDE_DEEP
-      : (round >= 3 ? GUIDE_COMMIT : GUIDE_BASE)
-
+    const guide = isComplexTask(text) ? GUIDE_DEEP : GUIDE_WEAK
     try {
       target.inbox.append('next-step', {
         id: `router-guide-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -157,6 +226,7 @@ export function apply(ctx, config) {
       const mode = overrides.get(session.id) ?? sessionMode(session)
       const modelId = currentAgent()?.options?.model
       return [
+        `router-mode=${routerMode} (standard=RL接口还原 / spec=深度思考优先)`,
         `mode=${fmtMode(mode)} (band=${bandFor(mode)})`,
         `persona=${personaFor(mode, modelId).replace(/\n/g, ' / ')}`,
         `core=[${coreFor(mode).join(', ')}]`,
