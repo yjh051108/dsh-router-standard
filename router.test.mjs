@@ -4,7 +4,8 @@ import test from 'node:test'
 import {
   classifyTask, personaFor, coreFor, bandFor, testinessFor, parseMode, applyPersona,
   isFlashModel, extractText, sessionMode,
-} from './preset/router-core.mjs'
+} from './preset/router-standard/router-core.mjs'
+import { apply as applyBootstrap } from './preset/router-standard/router-bootstrap.mjs'
 
 test('react: greenfield/build tasks map to react band', () => {
   assert.equal(bandFor(classifyTask('需要本地开发一个马里奥网页小游戏，参考经典原版')), 'react')
@@ -124,4 +125,149 @@ test('applyPersona replaces only the persona section (keeps plan-mode)', () => {
 test('applyPersona tolerates missing sections', () => {
   const out = applyPersona([], 'p')
   assert.deepEqual(out, [{ name: 'router-persona', text: 'p', order: 0 }])
+})
+
+test('router-bootstrap: standard mode first turn uses personaFor and limits tools, then promotes', async () => {
+  const events = []
+  const ctx = {
+    on(name, fn) {
+      events.push({ name, fn })
+    },
+    effect(fn) {
+      fn()
+    },
+    tools: {
+      register() {}
+    }
+  }
+
+  // Apply the plugin
+  applyBootstrap(ctx, { routerMode: 'standard' })
+
+  // Find the assemble hook
+  const assembleHook = events.find((e) => e.name === 'system-prompt/assemble').fn
+
+  // Mock session and assembly
+  const session = {
+    id: 'test-session-1',
+    events: [
+      { type: 'user/message', data: { source: { kind: 'user' }, content: [{ type: 'text', text: '开发一个小游戏' }] } }
+    ]
+  }
+  const agent = {
+    session,
+    options: { model: 'deepseek-v4-flash' }
+  }
+  const context = { agent }
+  const assembly = {
+    sections: [{ name: 'persona', text: 'You are an engineer.', order: 0 }],
+    tools: [
+      { name: 'pwsh' },
+      { name: 'str_replace_editor' },
+      { name: 'read' },
+      { name: 'write' }
+    ]
+  }
+
+  const next = async () => assembly
+
+  // First turn: not promoted
+  const res1 = await assembleHook(assembly, context, next)
+  // Tool should be restricted to shell (pwsh) + str_replace_editor
+  const toolNames1 = res1.tools.map((t) => t.name)
+  assert.deepEqual(toolNames1.sort(), ['pwsh', 'str_replace_editor'].sort())
+  // Persona should be task-aware, which is REACT_PERSONA since it is "开发一个小游戏"
+  const personaSection1 = res1.sections.find((s) => s.name === 'router-persona')
+  assert.ok(personaSection1.text.includes('hands-on'))
+
+  // Mock a persistent signal (assistant response)
+  session.events.push({ type: 'assistant/message', data: {} })
+
+  // Second turn: promoted
+  const res2 = await assembleHook(assembly, context, next)
+  // Full tools returned
+  const toolNames2 = res2.tools.map((t) => t.name)
+  assert.deepEqual(toolNames2.sort(), ['pwsh', 'str_replace_editor', 'read', 'write'].sort())
+})
+
+test('router-bootstrap: step-by-step guidance chooses correct guide based on round and complexity', async () => {
+  const events = []
+  const ctx = {
+    on(name, fn) {
+      events.push({ name, fn })
+    },
+    effect(fn) { fn() },
+    tools: { register() {} },
+    get(name) { return undefined }
+  }
+
+  applyBootstrap(ctx, { routerMode: 'standard' })
+
+  const eventHook = events.find((e) => e.name === 'session/event').fn
+
+  const appendCalls = []
+  const session = {
+    id: 'test-session-2',
+    events: []
+  }
+  const agent = {
+    session,
+    inbox: {
+      append(type, msg) {
+        appendCalls.push({ type, msg })
+      }
+    }
+  }
+  ctx.get = (name) => name === 'agent' ? agent : undefined
+
+  // 1. Simple task, round 1
+  const userMsg1 = {
+    type: 'user/message',
+    id: 'msg-1',
+    data: {
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: 'hello' }]
+    }
+  }
+  session.events.push(userMsg1)
+  eventHook(session, userMsg1)
+  assert.equal(appendCalls.length, 1)
+  assert.ok(appendCalls[0].msg.content[0].text.includes('Think deeply first, then act.'))
+
+  // 2. Simple task, round 3
+  const userMsg2 = {
+    type: 'user/message',
+    id: 'msg-2',
+    data: {
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: 'next step' }]
+    }
+  }
+  const userMsg3 = {
+    type: 'user/message',
+    id: 'msg-3',
+    data: {
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: 'more work' }]
+    }
+  }
+  session.events.push(userMsg2)
+  session.events.push(userMsg3)
+  eventHook(session, userMsg3)
+  assert.equal(appendCalls.length, 2)
+  assert.ok(appendCalls[1].msg.content[0].text.includes('this is a new round. Re-classify'))
+
+  // 3. Complex task
+  const userMsgComplex = {
+    type: 'user/message',
+    id: 'msg-4',
+    data: {
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: '帮我重构这个模块，并进行全面详细的设计和系统优化' }]
+    }
+  }
+  session.events.push(userMsgComplex)
+  eventHook(session, userMsgComplex)
+  assert.equal(appendCalls.length, 3)
+  assert.ok(appendCalls[2].msg.content[0].text.includes('architecture, edge cases'))
 })
