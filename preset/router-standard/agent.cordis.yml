@@ -51,6 +51,16 @@
   name: ./router-bootstrap.mjs
   config: {}
 
+# Defer the durable skill catalog past the first thinking: the pristine first
+# request carries NO <available_skills> (RL-aligned first-turn surface); once
+# the model produced its first response, dsh-tool-skill republishes it on the
+# next step. MUST stay registered before `tool-skill` (outermost pre-step).
+# Rollback: set `deferSkillCatalog: false` or delete this row.
+- id: skill-defer
+  name: ./skill-defer.mjs
+  config:
+    deferSkillCatalog: true
+
 # ── shell ───────────────────────────────────────────────────────────────────
 
 # `shell-env` stays in the HOST composition: `apps/cli/src/web.ts` injects it to

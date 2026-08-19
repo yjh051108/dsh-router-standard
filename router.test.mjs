@@ -4,7 +4,7 @@ import test from 'node:test'
 import {
   classifyTask, personaFor, coreFor, bandFor, testinessFor, parseMode, applyPersona,
   isFlashModel, extractText, sessionMode,
-} from './preset/router-core.mjs'
+} from './preset/router-standard/router-core.mjs'
 
 test('react: greenfield/build tasks map to react band', () => {
   assert.equal(bandFor(classifyTask('需要本地开发一个马里奥网页小游戏，参考经典原版')), 'react')
@@ -125,3 +125,86 @@ test('applyPersona tolerates missing sections', () => {
   const out = applyPersona([], 'p')
   assert.deepEqual(out, [{ name: 'router-persona', text: 'p', order: 0 }])
 })
+
+// ── skill-defer: defer the durable skill catalog past the first thinking ──
+import {
+  deferCatalog, hasModelOutput, stripSkillCatalog,
+} from './preset/router-standard/skill-defer.mjs'
+
+function catalogMsg() {
+  return { id: 'cat', source: { kind: 'skill-catalog', form: 'catalog', entries: [] }, content: [] }
+}
+function userMsg() {
+  return { id: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hi' }] }
+}
+function invocationMsg() {
+  return { id: 'inv', source: { kind: 'skill-invocation', name: 'x', form: 'instructions' }, content: [] }
+}
+
+test('hasModelOutput is false until the first model response', () => {
+  assert.equal(hasModelOutput(undefined), false)
+  assert.equal(hasModelOutput({}), false)
+  assert.equal(hasModelOutput({ events: [] }), false)
+  assert.equal(hasModelOutput({ events: [{ type: 'turn/start', data: { turn: 1 } }, { type: 'user/message', data: {} }] }), false)
+  assert.equal(hasModelOutput({ events: [{ type: 'assistant/chunk', data: {} }] }), false, 'stream chunks are not yet a response')
+  assert.equal(hasModelOutput({ events: [{ type: 'assistant/message', data: {} }] }), true)
+  assert.equal(hasModelOutput({ events: [{ type: 'tool/call', data: {} }] }), true)
+})
+
+test('stripSkillCatalog removes only the durable catalog message', () => {
+  assert.deepEqual(stripSkillCatalog([catalogMsg(), userMsg(), invocationMsg()]), [userMsg(), invocationMsg()])
+  assert.deepEqual(stripSkillCatalog([]), [])
+  assert.deepEqual(stripSkillCatalog(undefined), [])
+})
+
+test('deferCatalog strips the catalog on the pristine first step', () => {
+  const decision = { kind: 'enter', messages: [catalogMsg(), userMsg()] }
+  const out = deferCatalog(decision, { defer: true, session: { events: [] } })
+  assert.notEqual(out, decision)
+  assert.deepEqual(out.messages.map((m) => m.id), ['user'])
+})
+
+test('deferCatalog keeps the catalog once the first thinking ended', () => {
+  const decision = { kind: 'enter', messages: [catalogMsg(), userMsg()] }
+  const out = deferCatalog(decision, { defer: true, session: { events: [{ type: 'assistant/message', data: {} }] } })
+  assert.equal(out, decision, 'unchanged object after first response')
+})
+
+test('deferCatalog is a no-op with nothing to strip', () => {
+  const decision = { kind: 'enter', messages: [userMsg()] }
+  assert.equal(deferCatalog(decision, { defer: true, session: { events: [] } }), decision)
+})
+
+test('deferCatalog false restores old behavior (rollback path)', () => {
+  const decision = { kind: 'enter', messages: [catalogMsg()] }
+  assert.equal(deferCatalog(decision, { defer: false, session: { events: [] } }), decision)
+})
+
+test('deferCatalog leaves reject decisions untouched', () => {
+  const decision = { kind: 'reject', reason: 'blocked' }
+  assert.equal(deferCatalog(decision, { defer: true, session: { events: [] } }), decision)
+})
+
+test('skill-defer apply registers an agent/pre-step strip (outermost ordering)', async () => {
+  const registered = []
+  const fakeCtx = { on(event, handler) { registered.push({ event, handler }) }, logger: { debug() {} } }
+  const mod = await import('./preset/router-standard/skill-defer.mjs')
+  mod.apply(fakeCtx, { deferSkillCatalog: true })
+  assert.equal(registered.length, 1)
+  assert.equal(registered[0].event, 'agent/pre-step')
+  // next() = the inner chain (tool-skill's catalog append), which this
+  // outermost listener must run BEFORE inspecting the decision.
+  const pristine = { agent: { session: { events: [] } } }
+  const first = await registered[0].handler(
+    pristine,
+    () => Promise.resolve({ kind: 'enter', messages: [catalogMsg(), userMsg()] }),
+  )
+  assert.deepEqual(first.messages.map((m) => m.id), ['user'])
+  const responded = { agent: { session: { events: [{ type: 'assistant/message', data: {} }] } } }
+  const second = await registered[0].handler(
+    responded,
+    () => Promise.resolve({ kind: 'enter', messages: [catalogMsg(), userMsg()] }),
+  )
+  assert.deepEqual(second.messages.map((m) => m.id), ['cat', 'user'])
+})
+
