@@ -112,9 +112,22 @@ export function apply(ctx, config) {
     }
     core.add(shell)
 
+    // ── issue#42 fix: keep the first request's anchor clean ─────────────
+    // The bootstrapped first request must NOT carry injected skill-catalog
+    // reminders or memory/AGENTS summaries: those sections pollute the clean
+    // anchor. Keep only the router persona and the plan-mode boundary section;
+    // defer every other injected section until after the first durable
+    // tool/call, when the full catalog is exposed.
+    const bootSections = (sections || []).filter((section) => {
+      const n = String(section?.name || '')
+      if (n === 'persona' || n === 'router-persona') return true
+      if (/plan[-_ ]?mode/i.test(n)) return true
+      return false
+    })
+
     return {
       ...assembled,
-      sections,
+      sections: bootSections,
       contexts: [],
       tools: assembled.tools.filter((tool) => core.has(tool.name)),
     }

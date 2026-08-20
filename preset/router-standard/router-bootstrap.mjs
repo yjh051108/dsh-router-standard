@@ -67,6 +67,26 @@ export function apply(ctx, config) {
       return { ...assembled, sections, contexts: [] } // promoted: full catalog
     }
 
+    // ── issue#42 fix: keep the first request's anchor clean ─────────────
+    // The bootstrapped first request must NOT carry injected skill-catalog
+    // reminders or memory/AGENTS summaries: those sections pollute the
+    // clean anchor (measured: injections present → anchor fails, see
+    // dsh-anchored-standard issue #6). We keep only the router persona and
+    // the plan-mode boundary section (plan mode is toggled per plan state
+    // and carries instructions the model needs before any tool call); every
+    // other injected section (skill directory reminders, agent-instructions
+    // memory/AGENTS digest, etc.) is deferred until after the first durable
+    // tool/call, when the full catalog is exposed.
+    const bootSections = (sections || []).filter((section) => {
+      const n = String(section?.name || '')
+      if (n === 'persona' || n === 'router-persona') return true
+      if (/plan[-_ ]?mode/i.test(n)) return true
+      // Defer everything else injected by other plugins on the first request:
+      // skill catalog reminders, memory digests, workspace-instruction
+      // summaries — they belong to the promoted (post-bootstrap) catalog.
+      return false
+    })
+
     const core = new Set(coreFor(mode))
     const available = new Set(assembled.tools.map((tool) => tool.name))
     const shell = available.has('pwsh') ? 'pwsh' : available.has('bash') ? 'bash' : null
@@ -77,7 +97,7 @@ export function apply(ctx, config) {
 
     return {
       ...assembled,
-      sections,
+      sections: bootSections,
       contexts: [],
       tools: assembled.tools.filter((tool) => core.has(tool.name)),
     }
