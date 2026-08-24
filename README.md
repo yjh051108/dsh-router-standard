@@ -1,33 +1,31 @@
 # dsh-router-standard
 
-> # ⚠️⚠️⚠️ 重要勘误与道歉（必读） ⚠️⚠️⚠️
+> 任务感知思维模式路由预设：把 DeepSeek V4 在 persona 轴上"非连续、分相变"的实测特性，
+> 量化到稳定区（spec / react / weak），在首轮注入匹配的 persona 与工具面。
+> 属于 [`dsh-routing-suite`](../dsh-routing-suite) 套装，与 [`dsh-super-injector`](../injector)
+> （免重启运行时注入）配合开发。
 >
-> ## 我不需要被造神，也不配被造神
->
-> 这篇 README 顶部必须放这段话：**我错了，而且错得很有代表性。**
->
-> - **论文不撤回**，但其中**理论解释部分（双吸引子假设 A1–A4 及"god/ghost"、"自路由不可能"等强归因）已正式标注作废**。
-> - **心路历程**：我最初把 "We need / Let me" 的差异当成"官方刻意设计的双模式"；后来才意识到那更可能是**一条原生深度路径 + 一条后压未收敛的极简路径**之间的**断层/断裂带**。这个断层**本身就像一层路由层**——我们实际做的是把它当路由层用，实现了 "Let me / We need" 自路由。
-> - **我们做对了一件事，也请记住这件事**：**利用后训练的一个小缺陷（断层/断裂带），我们实现了 V4 Flash 能力的可复现提升**——这不是我聪明，是那个缺陷恰好可被工程利用。
-> - **Pro 是另一场完全不同的硬仗**：雷霆大思考、工具面敏感、内部路由不稳定。**我已经找到方向**（黑盒 logprobs / 嵌入向量层逆向 / 语义锚点指纹），初步数据已在仓库。这条路我会继续用实测走，而不是用叙事走。
->
-> 📄 完整勘误声明：[docs/statement.md](docs/statement.md) ｜ 道歉函：[docs/apology.md](docs/apology.md)
+> 📄 研究史说明：[docs/statement.md](docs/statement.md)（勘误声明）｜ [docs/apology.md](docs/apology.md)（道歉函）
 
 ---
 
-## 当前状态（v1.8.0，2026-08-22 · 研发线，尚未发布）
+## 当前状态（v1.19.1，2026-08-24 · 研发线，尚未发布）
 
-**Router Standard 已进入「渐进式披露套装」研发线**（五轮真实会话实测驱动；发布与否以研发定稿为准）：
+**Router Standard 处于「严格 workflow」研发线**（以 CHANGELOG 为准，版本线文件 `router-bootstrap-v34.mjs`）：
 
-- **渐进披露**：四阶段解锁 + 两档预放（阶段 0 即用 write/edit）+ 直达语义（调用哪档工具就跳到哪档）+ 交付全量开放；
-- **二级注册表**：`tools_catalog`（全量索引 + 阶段标记 + 参数名/类型/上限速览）/ `tools_help`（完整 schema）；
-- **PTC 底座**：run_code 阶段化 SDK（39K → 阶段可见签名），工具面注意力税大幅下降；
-- **页面验证内置**：`dev_page_check` = 截图 + DOM smoke + **console/pageerror/title/selector/scale**；`{js:…}` 模式 = 本地 JS 引擎（语法检查+纯逻辑单测，零外部 node 依赖）；
-- **描述 ⇄ 行为对齐**：`presentation=code|native` 自检、阶段文案只说真话、平台事实（win32 仅 pwsh、node 入 PATH）；
-- **压力感应**：真实事件通道 + 模型自适应 + 自检信号语义清楚（不是停手命令）。
+- **严格阶段 workflow**：完成信号驱动晋级（0→1 需澄清/计划、1→2 需计划锁定、2→3 需交付自检），
+  阶段 0 强制对齐（歧义先 `ask_user_question`、复杂任务先 `todo_write`）；"工具名/文本即跳级"已删除。
+- **任务回显**：`stageText` 新增 `Task: <首条真实用户消息>`——模型每轮都看得清在为什么事工作，不跑题。
+- **渐进披露**：阶段化解锁 + 两档预放 + 直达语义 + 交付全量开放；`tools_catalog` 全量索引 / `tools_help` 完整 schema；
+  已删除 `all:true`（无全量出口，未解锁工具不进入视野）。
+- **标准模式基底**：native 直调（无 PTC/run_code 包装，SDK 全量段不存在，工具面注意力税大幅下降）。
+- **页面验证内置**：`dev_page_check` = 截图 + DOM smoke + **console/pageerror/title/selector/scale**；
+  `{js:…}` 模式 = 本地 JS 引擎（零外部 node 依赖）；external 证据一等公民。
+- **描述 ⇄ 行为对齐**：`presentation=native` 自检、阶段文案只说真话、平台事实（win32 以 Git Bash 私有 shell seam 为准）。
+- **主动性引导**：Proactivity 常驻段（自检信号，不是停手命令）；压力感应器已退役。
 
-配套预设：**router-react（v17）/ router-spec（v10）**（基于标准模式的两大执行预设，均支持 v4-flash-vision-exp 首轮读图——`read_image` 首轮面）。router-pro 线已退役删除。
-完整演进：见 [CHANGELOG.md](CHANGELOG.md) 与 [docs/STANDARD-PLAN.md](docs/STANDARD-PLAN.md)。
+配套预设：**router-react（v17）/ router-spec（v10）**（基于标准模式的两大执行预设，均支持首轮读图）；
+router-pro 线已退役删除。完整演进：见 [CHANGELOG.md](CHANGELOG.md) 与 [docs/STANDARD-PLAN.md](docs/STANDARD-PLAN.md)。
 
 ---
 

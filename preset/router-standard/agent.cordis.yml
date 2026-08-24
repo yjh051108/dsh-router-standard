@@ -1,9 +1,8 @@
-# The `code` agent preset: the standard coding agent, presented as Code Mode.
+# The `router-standard` agent preset: the standard coding agent, presented in NATIVE mode.
 #
-# Everything in `standard` is here unchanged. What is added is the `tool-presentation`
-# row: instead of one tool call per action, the model writes a TypeScript
-# program against a generated SDK and `run_code` executes it, so a sequence
-# that would be five round trips becomes one.
+# Everything in `standard` is here unchanged. The router mounts `router-bootstrap`
+# below; tool presentation is the host's native registry (one call per tool) —
+# no generated SDK, no PTC/run_code wrapper, no Code Mode row.
 #
 # The registry itself stays on the host plane — the agent loop's scheduler and
 # the API proxy's presenters are its consumers — so what this preset owns is
@@ -60,10 +59,10 @@
 # never reached the model's shell at all. Both shell tools consume the host
 # registry from here; their executors (`bash-sandbox`/`pwsh-sandbox`) are
 # host-plane too.
-# 渐进披露路由（v0.7）：阶段化解锁 + PTC SDK 精简 + 主动性引导 + 二级注册表。
+# 渐进披露路由（v1.17）：阶段化解锁 + native 直调 + 主动性引导 + 二级注册表。
 
 - id: router-bootstrap
-  name: ./router-bootstrap-v34.mjs?v=50
+  name: ./router-bootstrap-v34.mjs?v=88
   config: {}
 
 # ── shell（win32：Git Bash 私有 shell seam——机制参照 liceses/dsh-gitbash-preset, MIT）──
@@ -80,7 +79,7 @@
     shell: true
   config:
     - id: gitbash-executor
-      name: ./gitbash-executor.mjs?v=11
+      name: ./gitbash-executor.mjs?v=49
       disabled: !!js process.platform !== 'win32'
       config: {}
 
@@ -295,6 +294,5 @@
 
 # ── presentation ────────────────────────────────────────────────────────────
 
-# Code Mode for this agent alone. The row waits for the host's `codeRuntime`
-# rather than assuming it: a deployment that composes no TypeScript runtime
-# fails this preset at mount, naming this id, instead of at the first request.
+# Native presentation: router-bootstrap calls toolsSvc.presentAs('native') at
+# phase_begin; tools are directly callable — no Code Mode / SDK row here.

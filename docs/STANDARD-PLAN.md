@@ -2,7 +2,7 @@
 
 **渐进式披露革命 —— 融合统一的最强套装预设**
 
-版本：v0.7（2026-08-21）→ 当前研发线 v1.17.1（2026-08-23）| 状态：**研发中，未发布**（以代码为准；历史章节保留演进真相）
+版本：v0.7（2026-08-21）→ 当前研发线 v1.19.1（2026-08-23）| 状态：**研发中，未发布**（以代码为准；历史章节保留演进真相）
 
 ---
 
@@ -41,14 +41,19 @@
 呈现 = 官方标准模式基底（native）：wire 数组 = restrict 过滤后的可见工具
       —— 注入面与调用面"同时"阶段化，直调保留，无 PTC 包装。
 阶段 0 了解/对齐   read/glob/grep/web_search/ask_user_question + 记忆（用户禁用则整包剔除）
-      ↓ 预放两档：write/edit 从阶段 0 即可用（调用即跳档）
-阶段 1 拟合方案    + todo_write/exit_plan_mode + 记忆盘点 + 预放验证工具
-      ↓ 直达语义：调用哪档工具就跳到哪档
+      ↓ 完成信号（对齐透/已提问/已记计划）→ 解锁阶段 1；无预放，模型只见当前阶段工具
+阶段 1 拟合方案    + todo_write/exit_plan_mode + 记忆盘点
+      ↓ 完成信号（计划锁定/已呈现）
 阶段 2 开发        + write/edit/str_replace_editor + 记忆沉淀
-      ↓ 完成标志：产物存在 + 自检通过
+      ↓ 完成信号（产物存在 + 自检通过）
 阶段 3 验证→交付   + pwsh/bash/read_image/jobs + delivery_check（交付 gate）
       ↓ 交付：restrict 释放，全量开放（文本单句，无矛盾）
 ```
+
+> **v1.20.0（用户定稿）：预解锁归零**——`windowFor(stage)` 由 `stage+3`（预放两档）改为 `stage+1`（只含当前档）。
+> 每阶段模型只看当前阶段工具，不知道/不预告后续工具（消除"知道后面有工具"的焦虑与大跃进入口）；
+> 机制框架保留（未来需放宽预放时只把 `stage+1` 改回 `stage+3` 即可回退）。
+> 哲学：**道德为主、法治为辅**——引导模型"没负担地竭尽全力做好当下"，gate 兜底不施压。
 
 **阶段文本 = 单一事实源**：系统头/引导/状态三处同值（同函数、同运行时列表），模型不再需要交叉验证。
 
@@ -346,6 +351,21 @@
 - **恢复会话 ≠ 新会话**：阶段按 session id 持久化——"继续旧会话"= 阶段 3/全量（设计）；"新会话"= 阶段 0。GUI 行为无法从预设侧区分。
 - **scope-local 宿主工具豁免 restrict**：dev_*/engram_* 由宿主插件注册到 agent 自身层，天然绕过阶段过滤——只要真实可调必如实列出（目录=绑定约定），但"注意力面"不可能裁剪它们以外的宿主注入工具。
 - **验证器探测是模型的职责**：指引不硬编码路径；模型若未探测到（Playwright 等），按诊断四步走（lite/路径/外部验证器/参数）。
+
+### 15.3 v1.18.x：注意力盲区 + 公告分组（用户定稿方向：解锁工具 + 解锁说明，闯关式引导）
+
+- **默认态 = 不知道**：`tools_catalog()` 默认只列当前可调工具（含预放/meta），未解锁工具一律不点名；白盒保留为主动查询——`query` 命中时展示（带「解锁于阶段 N」或「宿主·阶段外」），`all:true` 显式全量且每条未解锁均带标注。
+- **预放 vs 新增分组**：`phase_advance` 技能卡分 `New this stage` / `Pre-unlocked (already callable)` 两行；默认目录对预放工具标 `[可调]（预放）`——公告=实际，不再错位。
+- **指南压缩**：STAGE_GUIDES 每阶段 2–4 行「新关卡提示」（目标 + 新工具 + 硬规则一句）；阶段文本删除否定式长句。
+- **口径统一**：`Callable now` 与 `dev_router_status` 同源同序（meta shim 先装、stageText 后算）。
+- **自动初始化（新会话=阶段 0）**：检测到 `request/header reason=initial`（真正新会话）时自动从 0 开始，不受既有阶段记录影响；恢复会话（resume）保留原阶段。无手动开关。
+- **P0 减漂移（v1.18.2）**：`windowFor(stage)` 成为预放窗口单一事实源；`GLOBAL_SAFE`/`STAGE_HOST` 从 `STAGES` 派生；`stageText` 分 `Core:` / `Pre-unlocked:` 两栏（预放可见但降权）；bootstrap 引导与 system prompt 同用真实 runtime 列表——"当前档/预放一档/预放两档"只有一处可改。
+- **评审修复（v1.18.3）**：delivery_check `kind` enum 补 `'external'`（外部验证器证据一等公民真正可声明）+ `toJsonSchema` 递归（嵌套 schema 不被扁平化）；`registryFullIndex` own-first（tools_help 与 wire 同定义）；`phase_advance` 卡片在 memoryMuted 下过滤 engram；`dom()` 两份正则合并 `categorizeDomain`；`dev_reset_experience` 归 META；主版 status 与 shim 同口径；测试面改 import `-v34` 与运行面一致。
+- **P1（v1.18.4）**：`lastAdvance:{at,reason}` 持久化 + `dev_router_status` 展示"上次推进原因"；`loadStageState` 恢复 `stageAtTime`（修复 resume 时间过滤退化）；host 标注细分「宿主·常驻 / 宿主·交付期」。
+- **严格 workflow（v1.18.5）**：删除 `tools_catalog(all:true)`——二级披露无"一键全量出口"；默认面只列当前可调，白盒收敛为 `query` 单点（命中未解锁才给）。哲学：未解锁工具不进入视野；阶段需要但缺少的工具 → 修工具分配位置，而不是给绕过阶段的出口。
+- **完成信号驱动（v1.19.0）**：阶段晋级只由"完成本阶段任务"触发——对齐（0→1）：`ask_user_question` 已澄清或计划已记录；方案（1→2）：计划已锁定/呈现；开发（2→3）：`delivery_check`。工具名、文本意图不再跳级；阶段 0 完成标准强制"先对齐（提问/计划），没有对齐没有推进"；`phase_advance` 保留为显式闯关。
+- **引导 > 打回（v1.19.1）**：`stageText` 回显 `Task: <首条真实用户消息>`（每轮看清目标）；阶段指引尾部 `→ Done?` 完成动作提示；`phase_advance` 返回 `Next goal` 行；`tools_help` 对未解锁工具改口"当前调用会被拒绝；若认为应属当前阶段，请指出工具分配问题（调整 STAGES），而不是寻求绕过"——把"打回"变成"引导"。
+- 验证：`node --check` ×3、56/56 测试、selftest PASS、live reload v1.19.1。
 
 ---
 

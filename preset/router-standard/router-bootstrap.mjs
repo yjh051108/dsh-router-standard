@@ -1,73 +1,84 @@
 /**
- * router-bootstrap (standard v1.15.0): progressive tool disclosure — game-style timeline.
+ * router-bootstrap (standard v1.20.0): progressive disclosure with zero pre-unlock — each stage sees only its own tools (anti-"haste" main line).
  *
  * 时序（用户定稿）：
  *   T0 首轮 = 纯 RL 句（46 字符）+ phase_begin（唯一确认工具，native；稳定 we）
- *   T1 模型调 phase_begin（确认开启）→ Bootstrap 消息（声明+泄压+阶段0指引）
- *      + 解锁阶段 0 + 切换 PTC（presentAs code）
+ *   T1 模型调 phase_begin（确认开启）→ Bootstrap 消息（声明+主动性+阶段0指引）
+ *      + 解锁阶段 0 + 切换 native 呈现（presentAs native；v1.15 定案，PTC/run_code 已退役）
  *   T2 闯关：模型完成阶段 → phase_advance → 解锁下一档 + 阶段提示（一次）
  *
  * 要点：
- *   - 首轮无 restrict（phase_begin 可见）；确认后才 restrict/注入/切 PTC
+ *   - 首轮无 restrict（phase_begin 可见）；确认后才 restrict/注入/切 native
  *   - tools.restrict 是交集——释放旧 disposer 再设新（restrictLift per-session）
  *   - stage 状态持久化（stages.json：ensureStage/saveStageState）
  *   - we-form 阶段声明（you-form 是 let me 吸引子——用户命名 react=稳定we/spec=letMe）
  */
 
 import {
-  applyPersona, bandFor, bandOf, coreFor, parseMode, personaFor, sessionMode, testinessFor, clamp01,
-  classifyTask, extractText, isComplexTask,
-} from './router-core.mjs'
+  bandFor, sessionMode, extractText, isComplexTask,
+} from './router-core-v34.mjs'
 import { join, dirname } from 'node:path'
 import { homedir, tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
-import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, readdirSync, rmSync } from 'node:fs'
 import vm from 'node:vm'
 
 export const name = 'router-bootstrap'
 export const inject = ['systemPrompt', 'tools', 'llm']
 
 function toJsonSchema(spec) {
+  const buildProp = (meta) => {
+    const prop = { type: meta?.type || 'any' }
+    if (Array.isArray(meta?.enum)) prop.enum = meta.enum
+    if (meta?.description) prop.description = meta.description
+    if (meta?.properties) prop.properties = buildProps(meta.properties)
+    if (meta?.items) prop.items = buildProp(meta.items)
+    if (Array.isArray(meta?.required) && meta.required.length) prop.required = meta.required
+    return prop
+  }
+  const buildProps = (props) => {
+    const out = {}
+    for (const [key, meta] of Object.entries(props || {})) {
+      out[key] = buildProp(meta)
+      if (meta?.required === true) out.required = [...(out.required || []), key]
+    }
+    return out
+  }
   const properties = {}
   const required = []
   for (const [key, meta] of Object.entries(spec || {})) {
-    const prop = { type: meta.type }
-    if (Array.isArray(meta.enum)) prop.enum = meta.enum
-    if (meta.description) prop.description = meta.description
-    properties[key] = prop
-    if (meta.required) required.push(key)
+    properties[key] = buildProp(meta)
+    if (meta?.required === true) required.push(key)
   }
   return { type: 'object', properties, required, additionalProperties: false }
 }
 
 const RL_PERSONA = 'You are a helpful software engineer assistant.'
-const ROUTER_VERSION = 'v1.15.0'
+const ROUTER_VERSION = 'v1.20.0'
 /* 描述单源（v1.13 审计修复）：main 注册与 own-layer shim 读同一份，杜绝双份漂移。 */
 const DESC = {
-  toolsCatalog: '渐进式披露一级：全部工具（名称 + 一行摘要 + 阶段标记）。query 关键词过滤；domain 域浏览。',
-  toolsHelp: '渐进式披露二级：单个工具的完整 schema（参数/必需/描述）。精准调用前先查。',
-  phaseAdvance: '闯关推进：声明当前阶段已完成，进入下一阶段（解锁新工具 + 阶段提示）。逐级推进（一次一级，不跳级）；预放工具调用会直达其档，不需要 phase_advance。仅在明确完成本阶段工作时调用。进入验证/交付阶段后：先 delivery_check(file[, url], evidence)，PASS 才可宣告完成。',
+  toolsCatalog: '渐进式披露一级：默认只列当前阶段可调工具（未解锁不点名、不预告后续工具）；query 单点白盒（命中未解锁才给相关行，带解锁阶段/交付期标注）；无全量出口——严格按阶段推进，未解锁工具名称不进入视野。行标注=运行时真绑定。',
+  toolsHelp: '渐进式披露二级：单个工具的完整 schema（含解锁阶段提示）。查询本身是主动行为——可查未解锁工具详情，但调用会被拒绝。',
+  phaseAdvance: '闯关推进：声明当前阶段已完成，进入下一阶段（解锁新工具 + 阶段提示）。逐级推进（一次一级，不跳级）。仅在明确完成本阶段工作时调用。进入验证/交付阶段后：先 delivery_check(file[, url], evidence)，PASS 才可宣告完成。',
   routerStatus: 'Show the current routing state (phase, band, persona, unlocked tools, override). No arguments — call as tools["dev_router_status"]({}).',
-  deliveryCheck: '交付 gate（阶段出口契约）。检查清单：file-exists / file-nonempty / encoding-utf8（必查）+ headless-smoke（页面类必查：传 url；requireSmoke 默认 true——省略 url 会 FAIL，不再可绕过）+ delivery-evidence。evidence 结构（tools_help 同源）：{ items: [{ label, kind ∈ file|page|image|run|test|text, target?（file/page/image/test 必填路径）, result?（run/text 必填文本）, reviewed?: true（page/image 视觉类必须人工复核） }] }。⚠️ 全部 PASS 才允许宣告完成；任一 FAIL 修复后重跑，不允许绕过。',
+  deliveryCheck: '交付 gate（阶段出口契约）。检查清单：file-exists / file-nonempty / encoding-utf8（必查）+ headless-smoke（页面类必查：传 url；requireSmoke 默认 true——省略 url 会 FAIL，不再可绕过）+ delivery-evidence。evidence 结构（tools_help 同源）：{ items: [{ label, kind ∈ file|page|image|run|test|text|external|numeric, target?（file/page/image/test 必填路径）, result?（run/text/external 必填文本）, external?（kind=external：target=输出路径或命令、result=结果摘要）, reviewed?: true（page/image 视觉类必须人工复核） }] }。⚠️ 全部 PASS 才允许宣告完成；任一 FAIL 修复后重跑，不允许绕过。',
 }
 const PROGRESSIVE_DECL =
   'We hold a full tool registry (see tools_catalog for the live count), revealed in phases. tools_catalog lists every tool (name + summary + [phase mark] + param names); tools_help <name> returns any tool\'s complete spec. We query on demand and call precisely. '
-  + 'Meta tools are always callable: tools_catalog/tools_help (secondary disclosure), phase_advance/dev_router_status/dev_router_mode (level-up & self-check), dev_reload_preset_live (live reload), dev_page_check (page verification + local JS engine), delivery_check (delivery gate). '
+  + 'Meta tools are always callable: tools_catalog/tools_help (secondary disclosure), phase_advance/dev_router_status (level-up & self-check), dev_reload_preset_live (live reload), delivery_check (delivery gate). '
   + 'Long-running goals carry goal tools: get_goal / create_goal / update_goal (read before updating, mark complete only when actually achieved). '
-  + 'Tool signatures are NOT uniform: before the first use of any tool this session, read its parameter names via tools_catalog or tools_help (or the SDK type inside run_code) — never guess. Runtime caps (read lines, search count, output bytes) are enforced at call time — check tools_help before big calls. '
-  + 'Tools are directly callable (native mode — no wrapping, no run_code needed): call write/edit/read/pwsh directly; only the current phase\'s tools are injected (full schema never flooded). Zero-arg tools still take {}: tools[\'dev_router_status\']({}). '
-  + 'write/edit bindings return the FULL before/after text — take only path/operation, never print a whole write/edit result (context explosion); inspect the changed lines with grep/read instead. Page verification is built in: dev_page_check(url) → headless Chrome, fresh profile, screenshot + DOM snippet.'
+  + 'Tool signatures are NOT uniform: before the first use of any tool this session, read its parameter names via tools_catalog or tools_help — never guess. Runtime caps (read lines, search count, output bytes) are enforced at call time — check tools_help before big calls. '
+  + 'Tools are directly callable (native mode — no wrapping): call write/edit/read/pwsh directly; only the current phase\'s tools are injected (full schema never flooded). Zero-arg tools still take {}: tools[\'dev_router_status\']({}). '
+  + 'write/edit bindings return the FULL before/after text — take only path/operation, never print a whole write/edit result (context explosion); inspect the changed lines with grep/read instead. Verify your own work: use bash to run a headless browser / playwright (or install one) and screenshot/render the page, then read_image the shot to visually confirm — do not rely on a fixed page-verify tool.'
   + ' Proactivity protocol: act on reversible next steps; ask only for user-owned choices; report actions with evidence.'
 const PRESSURE_GUIDE =
   '\n\nProactivity (replaces the pressure valve): every turn, before awaiting the user, scan for the next actionable item — unfinished work, unverified claims, reversible improvements, unfixed warnings. Choose one and act; report what you did and why. Ask only when the choice belongs to the user (preference, budget, irreversible/destructive, external approval). Two or more dependent steps: think step by step, but do not stop to ask permission for reversible work. Depth is our call: a small result gets a small thought, a consequential fork gets full reasoning.'
 const START_GUIDE =
-  '\n\nBootstrap (once per session): this is a progressive tool-unlock session — tools open in phases like a leveling game. Call phase_begin to confirm start (unlock phase-0 tools + Code Mode).'
+  '\n\nBootstrap (once per session): this is a progressive tool-unlock session — tools open in phases like a leveling game. Call phase_begin to confirm start (unlock phase-0 tools; presentation stays native). A brand-new conversation auto-starts at phase 0 — no manual reset needed.'
   + 'Unlock order: understanding (read/glob/grep/web_search/ask_user_question) → planning (todo_write) → development (write/edit/str_replace_editor) → verification (pwsh/read_image/jobs). '
   + 'This guide appears only once; after this, no phase messages are injected. '
   + 'Current phase + unlocked tools are always visible in the system prompt (router-stage section) and via dev_router_status. '
-  + 'Meta tools are always available: tools_catalog (index), tools_help (full schema), phase_advance (level up), dev_router_status/dev_router_mode (self-check & override), dev_page_check (page verification), delivery_check (delivery gate). '
-  + 'Tools are directly callable from now on (native mode) — only this phase\'s tools are on the wire; the full registry is revealed phase by phase. '
-  + 'You route yourself: to advance, use a next-tier tool (it is pre-unlocked), call phase_advance, or state that the current phase is done.'
+  + 'You route yourself: to advance, complete the current phase — alignment (ask_user_question / plan recorded) → planning (plan locked) → development (self-check) → verification (delivery_check) — or call phase_advance; tool usage alone never skips a stage.'
 
 const STAGES = [
   { name: '了解/对齐', tools: ['read', 'glob', 'grep', 'web_search', 'ask_user_question', 'engram_recall', 'engram_verify', 'engram_respond'] },
@@ -78,47 +89,105 @@ const STAGES = [
 // 平台事实（v1.12）：win32 已由 gitbash-shell 组提供真 Git Bash（isolate realm 私有 shell seam，
 // 机制参照 liceses/dsh-gitbash-preset, MIT）——bash 重回验证档（原 v1.5 的平台剔除已回退）。
 
+/** 阶段表的工具全集（单一事实源：STAGES 派生，v1.18.2）。 */
+const STAGE_SAFE = STAGES.flatMap((s) => s.tools)
 const GLOBAL_SAFE = [
-  'read', 'write', 'edit', 'glob', 'grep', 'web_search', 'ask_user_question',
-  'todo_write', 'exit_plan_mode', 'pwsh', 'bash', 'read_image',
-  'job_list', 'job_output', 'job_kill', 'str_replace_editor',
-  'tools_catalog', 'tools_help', 'dev_router_status', 'dev_router_mode', 'phase_begin', 'phase_advance',
+  ...STAGE_SAFE,
+  'tools_catalog', 'tools_help', 'dev_router_status', 'phase_begin', 'phase_advance',
   'engram_recall', 'engram_store', 'engram_propose', 'engram_confirm', 'engram_reject',
   'engram_open', 'engram_search', 'engram_link', 'engram_update', 'engram_remove',
   'engram_promote', 'engram_status', 'engram_verify', 'engram_respond',
-  'dev_reload_preset_live', 'dev_page_check', 'delivery_check',
+  'dev_reload_preset_live', 'delivery_check',
   'get_goal', 'create_goal', 'update_goal',
 ]
 
-const META_TOOLS = ['phase_advance', 'dev_router_status', 'dev_router_mode', 'tools_catalog', 'tools_help']
-const META_LIVE = [...META_TOOLS, 'dev_reload_preset_live', 'dev_page_check', 'phase_begin', 'delivery_check']
+const META_TOOLS = ['phase_advance', 'dev_router_status', 'tools_catalog', 'tools_help']
+const META_LIVE = [...META_TOOLS, 'dev_reload_preset_live', 'dev_page_check', 'phase_begin', 'delivery_check', 'dev_reset_experience']
 const META_GOAL = ['get_goal', 'create_goal', 'update_goal']
 const META_ALL = [...META_LIVE, ...META_GOAL]
+
+/** 窗口（单一事实源）：返回 STAGES.slice 的结束索引。
+ *  v1.20（用户定稿）：预解锁归零——`stage+3` 预放两档改为 `stage+1` 只含当前档。
+ *  效果：模型每阶段只看到当前阶段工具，看不到后续工具（消除"知道后面有工具"的焦虑与大跃进入口）；
+ *  机制框架（windowFor/preUnlockedFor/stageSummary）保留，未来需放宽预放时只改此常量即可回退。 */
+export function windowFor(stage) { return Math.min(stage + 1, STAGES.length) }
 
 /** 闯关提示（常驻于 stageText——每阶段的"要解锁 X，先做 Y"引导；免打断、经压缩不丢）。
  *  实测吸收（v1.4）：参数不猜/重读再改/Windows shell/沙箱提升/多图对比。
  *  v1.5：caps 提示 / write-edit 只用 path / shell 真实语义 / dev_page_check。
  *  v1.6：预放两档 + 直达语义（写 HTML 直给任务零路由成本）；跨语言转义提醒。 */
 const STAGE_GUIDES = [
-  'Phase: understanding. Unlocked: read/glob/grep/web_search/ask_user_question + memory (engram_recall/verify/respond) + pre-unlocked write/edit (two tiers ahead — calling one jumps straight there). Ground first: recall, verify claims, then read/ask. Design or build intent already unlocks development tools — no routing ceremony needed. Runtime caps (read lines, output bytes) are enforced at call time — check tools_help before big calls. Complete when: the task requirements and available evidence are stated clearly. Then work (write is already unlocked). Stage-tool note: bash/pwsh/read_image belong to the verification stage — they show [未解锁] at stage 0, become [可调] from stage 1 (pre-unlocked two tiers) and [全量] at stage 3; this is not "after delivery".',
-  'Phase: planning. Unlocked: todo_write/exit_plan_mode + memory review (engram_search/open) + pre-unlocked write/edit/pwsh. Lock the plan, then work — calling a pre-unlocked tool jumps to its phase; phase_advance advances one stage (never skips). Complete when: the plan is recorded and decisions are locked. Then develop.',
-  'Phase: development. Unlocked: write/edit/str_replace_editor + memory write (engram_store/link) + pre-unlocked verification tools. Re-read before re-edit: a file changed since your last read must be read again first (editor enforces a fresh read). write/edit results carry the FULL before/after text — take only path/operation and inspect changed lines with grep/read; never print a whole write/edit result. Cross-language escaping: run_code programs are JS — PowerShell "${env:V}" is template-interpolated by JS; build such strings with single quotes or concatenation first. Complete when: the artifact exists and passes its own self-check (loads, no console errors, key values sane). Visual checks: read_image is already callable (pre-unlocked) — after dev_page_check, read the screenshot directly. Then phase_advance to verification.',
-  'Phase: verification → delivery gate. Unlocked: pwsh/bash/read_image/jobs + dev_page_check + delivery_check (meta). Shell: Windows: bash = Git Bash (MSYS, GNU) — first-class shell (pwsh remains for PowerShell-native needs); POSIX: bash. Git Bash needs full access to start (MSYS cannot run under a restricted token) — if it fails at workspace-write, do the documented one-shot escalation, never bypass the sandbox. Page verification (official-standard path): pwsh/bash + external validator (Playwright or any runner) — discover it on this machine (python -m playwright / npx playwright / installed browsers), set whatever env var the runner needs, report the resolved paths; then read_image each screenshot (kind=page/image/external, reviewed:true). dev_page_check is an OPTIONAL convenience (its own diagnostic lists next steps when it fails; lite:true for heavy pages; js: for pure-logic checks). **Evidence gate: delivery_check requires a manifest** — text/code: read/grep assertions or dev_page_check({js}) (kind=text/test); commands: real stdout summary (kind=run); pages/3D/images: external validator screenshots + read_image review each (kind=page/image/external, reviewed:true — 3D usually iso/front/side/top). Delivery PASS requires evidence on top of file/UTF-8/headless checks; missing evidence, missing targets, unreviewed visuals, or empty run results → FAIL. ⚠️ Switching shells (pwsh→bash) is NOT a sandbox escalation: escalate the exact policy-denied command once via sandbox_permissions — never switch shells to sidestep. **Complete only when: delivery_check(file, url|external evidence) returns PASS** — until then, do NOT report the task as delivered; any FAIL: fix and re-run. If the sandbox denies an in-place verify, escalate the exact command once, never work around it.',
+  'Phase: understanding. Unlocked: this stage only — read/glob/grep/web_search/ask_user_question + memory recall/verify/respond. Ground first: recall → verify → read/ask. Do this stage properly and think broadly — do not settle on the first obvious reading. Break the request into its dimensions (what the user wants, how features should behave, what "good" looks like) and surface the genuinely ambiguous ones: a word like "拖拽" could mean reorder, drag-to-recategory, or both; "瀑布流" could mean masonry columns or JS-grid; persistence is often unspecified. **Decide each ambiguity by its impact:** if you can infer the common meaning and only one interpretation is reasonable for a deliverable, state that assumption clearly in one sentence (so the user can correct it) and continue — but if two or more interpretations would materially change the result (reorder vs recategory; persist vs not), ask ONE focused ask_user_question per such ambiguity, with concrete options. Do not under-ask (assume everything) nor over-ask (interrogate trivia) — aim for the questions that actually change the artifact. This is a deep-thinking stage: if the task is complex, also record a plan (todo_write). **Complete when: you understand the task (assumptions stated, or key ambiguities answered) — and, if complex, a plan is recorded. No alignment, no advancement.** → Done? Understood (stated assumption / question answered / plan recorded) → next stage.',
+  'Phase: planning. Unlocked: todo_write/exit_plan_mode + memory review (search/open). Do this stage properly: design the approach, cover edge cases, define what "done" means, and decide acceptance criteria — not just list steps. **Attention reclamation (v1.26): assetize your context — keep the task goal + the current decision + the live evidence in the attention window; sink settled exploration/details into memory (engram_store) instead of holding them all; let stale, superseded, or resolved threads truly drop (fresh context recovers attention). Do not hold "everything might be useful" in mind — that is attention leakage, not diligence.** **Isolation & parallel (pillar 4): when two independent concerns are polluting one thread, or a sub-problem is eating the mainline budget, push it into a subagent / workflow (independent context) instead of keeping it in the same stream — a focused subagent holds its own attention so your mainline stays on the critical path.** **Complete when: the plan is thorough enough that the design is decision-complete (what to build, how it fits, what success looks like), recorded via todo_write or presented via exit_plan_mode.** Only this lets you enter development. Note: a completion signal (todo_write / exit_plan_mode) AUTO-advances to the next phase — do NOT call phase_advance after it, or you will skip a phase. → Done? Plan is decision-complete and locked (todo_write / exit_plan_mode) → develop (auto).',
+  'Phase: development. Unlocked: write/edit/str_replace_editor + memory write (store/link). Re-read before re-edit (editor enforces fresh read); write/edit results carry FULL before/after text — take path/operation, inspect with grep/read. Do this stage properly: make the artifact real, self-check it against the plan and the acceptance criteria, and do not declare it done until it actually passes its own check. **Avoid local-optima (v1.22): keep the WHOLE artifact working while you iterate. If you find yourself re-fighting the same detail for several rounds with no convergence (e.g. a finite-difference sign, a conservation drift), step back: (1) is this detail blocking the overall deliverable, or is it polish? (2) preserve a working version; iterate on the detail in parallel, not by stalling the whole. (3) if a detail resists, finish the rest and re-attack it fresh — do not let one stubborn sub-problem stall the deliverable.** **Complete when: the artifact exists and passes its self-check — then enter verification via delivery_check (completion signal) or phase_advance.** → Done? Self-check passes → delivery_check → verification.',
+  'Phase: verification → delivery gate. Unlocked: pwsh/bash/read_image/jobs + delivery_check. Windows: bash = Git Bash (first-class), pwsh for PowerShell; Git Bash may need the one-shot sandbox escalation (approval=never: if denied, report it — never bypass). Page verify with your OWN tools: run a headless browser/playwright via bash (or install one), screenshot + read_image each shot (reviewed:true) to visually confirm. **On verification failure, hold a quick hypothesis-audit (guidance, not a hard block): before touching the implementation, name in one line (a) which assumption you are now re-checking, (b) what NEW evidence you just gained — this turns "doubt the hypothesis" from a prompt into a habit. If the code is actually correct, say so and move on (do not manufacture a bug to justify rework).** Then check gates/evidence. Do this stage properly: verify the real artifact, not a summary of it — check evidence, look for defects, review the visuals honestly. **Gate: delivery_check must PASS — evidence manifest required; missing evidence/unreviewed visuals = FAIL.**',
 ]
 
 /** 阶段文本（we-form——you-form 是 let me 吸引子）。
  *  v1.6：预放两档（stage 0 就用得到 write/edit）——消除"先玩一遍路由才能干活"的摩擦。 */
 function stageSummary(stage) {
-  const unlockedEnd = Math.min(stage + 3, STAGES.length)
+  const unlockedEnd = windowFor(stage)
   const unlocked = STAGES.slice(0, unlockedEnd).flatMap((s) => s.tools).concat(META_ALL)
   const nextTier = stage + 1 < STAGES.length ? STAGES[stage + 1].tools : []
   const nextAfter = stage + 2 < STAGES.length ? STAGES[stage + 2].tools : []
   return { name: STAGES[stage].name, stage, unlocked, nextTier, nextAfter }
 }
+/** 工具阶段归属（v1.18.1 单一出口）：stage（参与阶段）/ meta（常驻）/ host（宿主·阶段外）。 */
+export function stageInfo(name) {
+  const idx = STAGES.findIndex((s) => s.tools.includes(name))
+  if (idx >= 0) return { kind: 'stage', stage: idx }
+  if (META_ALL.includes(name)) return { kind: 'meta' }
+  return { kind: 'host' }
+}
+/** 当前阶段的预放工具集（stage+1 .. stage+2 两档窗口内、尚未进入本阶段的工具）。 */
+export function preUnlockedFor(stage) {
+  const end = windowFor(stage)
+  const seen = new Set()
+  for (let i = 0; i <= stage; i++) for (const n of STAGES[i].tools) seen.add(n)
+  const out = []
+  for (let i = stage + 1; i < end; i++) for (const nm of STAGES[i].tools) { if (!seen.has(nm)) { seen.add(nm); out.push(nm) } }
+  return out
+}
+/** 目录行标注（v1.18.1 统一）：未解锁 → 阶段 N / 宿主·阶段外；可调且属预放 → （预放）。 */
+export function catalogMarkExtra(name, mark, stage) {
+  const info = stageInfo(name)
+  if (mark === '未解锁' && info.kind === 'stage') return '（解锁于阶段 ' + info.stage + '）'
+  if (mark === '未解锁' && info.kind === 'host') return '（宿主·交付期：阶段 3 全量开放）'
+  if (mark === '可调' && info.kind === 'host') return '（宿主·常驻）'
+  if (mark === '可调' && preUnlockedFor(stage).includes(name)) return '（预放）'
+  return ''
+}
+/** help 解锁行（v1.18.1 统一）：阶段工具/宿主工具两种表述。 */
+export function helpUnlockLine(name, mark) {
+  if (mark !== '未解锁') return ''
+  const info = stageInfo(name)
+  if (info.kind === 'stage') return '解锁阶段: ' + info.stage + '（当前调用会被拒绝；详情可提前查阅。若你判断它应属于当前阶段，请指出工具分配问题（调整 STAGES），而不是寻求绕过）'
+  return '解锁阶段: 交付期（宿主工具·阶段 3 全量开放；当前调用会被拒绝。若你认为它应在当前阶段，请指出工具分配问题）'
+}
+/** 域分类（v1.18.3 单源）：主/shim 共用，替代两份正则启发式。 */
+export function categorizeDomain(name, desc) {
+  const t = name + ' ' + desc
+  if (/(read|write|edit|glob|grep|str_replace_editor|fs|file|path)/i.test(t)) return 'file'
+  if (/(bash|pwsh|shell|run_code|exec|command|spawn)/i.test(t)) return 'exec'
+  if (/(web|search|fetch|http|network|browse)/i.test(t)) return 'network'
+  if (/(subagent|agent|delegate|workflow|ralph|fork)/i.test(t)) return 'delegate'
+  if (/(engram|memory|recall|store|search)/i.test(t)) return 'memory'
+  return 'other'
+}
 /** 记忆工具判定（v1.16：#4 用户禁用记忆 → 调用面+注入面双双剔除，不是只改引导句）。 */
 export function isMemoryTool(name) { return /^engram_/.test(String(name || '')) }
 export function muteAwareList(names, muted) {
   return muted ? (names || []).filter((n) => !isMemoryTool(n)) : names
+}
+
+/** 会话是否为新会话（DSH request/header reason=initial）——即使 session id 复用了旧阶段记录，也自动从 0 开始。 */
+export function sessionFresh(agent) {
+  try {
+    for (const e of agent?.session?.events || []) {
+      if (e.type === 'request/header' && e.data?.reason === 'initial') return true
+    }
+  } catch { /* 无法判定时按旧会话处理 */ }
+  return false
 }
 
 /** 用户显式禁用（v1.15 建议 #4——还原不是控制：用户说"不用记忆"就不再引导）。
@@ -135,12 +204,27 @@ export function memoryMuted(session) {
   } catch { return false }
 }
 
+/** 会话任务回显（v1.19.1 引导工程）：取第一条真实用户消息，让模型每轮都看清"我在为哪件事工作"。 */
+export function firstUserTask(session) {
+  try {
+    for (const e of session?.events || []) {
+      if (e.type !== 'user/message') continue
+      const src = e.data?.source ?? e.data?.message?.source
+      if (src?.kind !== 'user') continue
+      const txt = extractText(e.data).trim()
+      if (txt) return txt.length > 160 ? txt.slice(0, 160) + '…' : txt
+    }
+  } catch { /* ignore */ }
+  return ''
+}
+
 /** 单一事实源（v1.15 建议 #2）：阶段文本只有一份正交真相——
  *  非交付：Callable now = 运行时可见面（runtimeCallable），其余全部锁定（无矛盾句）；
  *  交付：full catalog open（restrict 已释放），无 Locked 句。列表与 dev_router_status 同源。 */
-function stageText(stage, runtimeList, muted) {
+function stageText(stage, runtimeList, muted, taskText = '') {
   const s = stageSummary(stage)
   const callable = runtimeList && runtimeList.length ? runtimeList : s.unlocked
+  const taskLine = taskText ? '\nTask: ' + taskText : ''
   let guide = STAGE_GUIDES[stage] || ''
   if (muted) {
     guide = guide
@@ -151,23 +235,30 @@ function stageText(stage, runtimeList, muted) {
   }
   if (stage >= STAGES.length - 1) {
     return 'Current phase: ' + s.name + ' (' + s.stage + '/3). Delivery: restrict released — full catalog open: ' + callable.join(', ')
+      + taskLine
       + '\nDelivery evidence gate: provide an evidence manifest (kind by artifact). Visual/3D tasks: capture views + read_image review; no fixed view count.'
       + '\nStage guide: ' + guide
       + '\nUntil delivery_check passes, do NOT declare the task delivered. Delivery is the gate, not a progress label.'
   }
-  return 'Current phase: ' + s.name + ' (' + s.stage + '/3). Callable now: ' + callable.join(', ')
-    + '\nNot yet callable (until delivery): every tool NOT in the Callable-now list stays locked — that is the single truth; no other lock text exists.'
+  const preSet = new Set(preUnlockedFor(stage))
+  const core = callable.filter((n) => !preSet.has(n))
+  const pre = muteAwareList(callable.filter((n) => preSet.has(n)), muted)
+  return 'Current phase: ' + s.name + ' (' + s.stage + '/3). Core: ' + core.join(', ')
+    + taskLine
+    + (pre.length ? '\nPre-unlocked (already callable): ' + pre.join(', ') : '')
+    + '\nMore tools unlock with the next stage — browse on demand: tools_catalog(query) (single-point whitebox).'
     + '\nStage guide: ' + guide
-    + '\nPhase is self-routed state: calling a pre-unlocked tool jumps the phase to that tool\'s stage; phase_advance (meta) advances one stage; or state that our phase is done.'
+    + '\nPhase is self-routed state: advancing requires the phase completion signal (ask_user_question/todo_write/exit_plan_mode/delivery_check) or phase_advance; tool usage alone never skips a stage.'
 }
 
-/** PTC 阶段化 SDK：按当前阶段生成精简 SDK 文本（替换 tools:sdk 段—— 39K 全量 SDK 是注意力税；阶段精简版只给当前阶段调用签名 + 全量声明）。 */
+/** 兼容旧 PTC 呈现的阶段化 SDK 头：标准模式已是 native（此类通常不再触发）；
+ *  若宿主仍注入 run_code，则给 tools:sdk 段加一行阶段头（39K 全量 SDK 仍是注意力税）。 */
 function buildStagedSdk(sections, stage) {
   const sdk = sections.find((s) => s?.name === 'tools:sdk')
   if (!sdk) return null
-  const stageTools = STAGES.slice(0, Math.min(stage + 3, STAGES.length)).flatMap((s) => s.tools).concat(META_ALL)
+  const stageTools = STAGES.slice(0, windowFor(stage)).flatMap((s) => s.tools).concat(META_ALL)
   // 真实 SDK 由 registry 生成：sdkSchemas(view) 已按 restrict + own-layer 阶段化，
-  // 保留其完整类型声明；只加一行阶段头，避免 bullet 清单丢掉 schema（补全 run_code 工具 schema）。
+  // 保留其完整类型声明；只加一行阶段头，避免 bullet 清单丢掉 schema。
   if (typeof sdk.text === 'string') {
     const header = '## 阶段化工具（当前可见）：' + stageTools.join(', ') + '\n\n'
     return { ...sdk, text: header + sdk.text }
@@ -222,9 +313,9 @@ function registryFullIndex(toolsSvc, scope) {
     const chain = (typeof ls?.chainLayers === 'function' ? ls.chainLayers(scope) : []) || []
     const own = typeof ls?.peek === 'function' ? ls.peek(scope) : undefined
     const layersList = []
-    if (ls?.global) layersList.push(ls.global)
+    if (own) layersList.push(own) // v1.18.3：own（scope 自身注册）优先——tools_help 与 wire 同定义，杜绝"描述漂移"
     layersList.push(...chain)
-    if (own) layersList.push(own)
+    if (ls?.global) layersList.push(ls.global)
     const findDef = (name) => {
       for (const layer of layersList) {
         const lt = layer?.tools
@@ -234,7 +325,7 @@ function registryFullIndex(toolsSvc, scope) {
         }
         if (def) return def
       }
-      /* host 兜底（v1.13）：run_code 等 host 注入核心工具不在层链——从 registry 视图/原始 schemas 反查 */
+      /* host 兜底（v1.13）：host 注入核心工具（旧 run_code 系）不在层链——从 registry 视图/原始 schemas 反查 */
       try {
         if (typeof toolsSvc?.view === 'function') {
           const d = toolsSvc.view(scope)?.tools?.get?.(name)
@@ -255,20 +346,20 @@ function registryFullIndex(toolsSvc, scope) {
   } catch { return [] }
 }
 
-/** 二级披露可见性标记（v1.9 根修——"标注可调但 run_code 未绑定"六轮实弹反馈）：
+/** 二级披露可见性标记（v1.9 根修——"标注可调但运行时未绑定"六轮实弹反馈）：
  *  静态阶段映射会与运行时 view(scope).visible（SDK 真绑定）错位；标记必须回答
- *  "这个工具现在真的绑在 run_code 的 tools 上吗"——以运行时可见面为准。 */
+ *  "这个工具现在真的绑在运行时可见面上吗"——以运行时可见面为准。 */
 export function markerFor(name, stage) {
   if (stage >= STAGES.length - 1) return '全量'
   if (META_ALL.includes(name)) return 'meta'
   const idx = STAGES.findIndex((s) => s.tools.includes(name))
   if (idx < 0) return '未解锁'
-  if (idx <= stage + 2) return '可调' // v1.6 预放两档 = 已可调："预解锁" 与 "可调" 无行为差 → 单语义
+  if (idx < windowFor(stage)) return '可调' // v1.6 预放两档 = 已可调："预解锁" 与 "可调" 无行为差 → 单语义
   return '未解锁' // v1.14：『未解锁』= 尚未进入当前+预放窗口（如 bash 属验证档：阶段1起预放、阶段3全量），非"交付之后才给"
 }
 
 /** 运行时真绑定标记（v1.9）：registry.view(scope).visible 是 SDK 生成的唯一事实源——
- *  visible.has(name) = run_code 的 tools[name] 一定存在；否则一律"交付后"，绝不谎报。 */
+ *  visible.has(name) = 该工具在运行时可见（一定可调）；否则一律"未解锁"，绝不谎报。 */
 export function runtimeMark(toolsSvc, scope, name) {
   try {
     if (typeof toolsSvc?.view !== 'function') return markerFor(name, 0)
@@ -288,7 +379,7 @@ export function runtimeCallable(toolsSvc, scope) {
     const visible = toolsSvc.view(scope).visible
     const keys = typeof visible?.keys === 'function' ? visible.keys() : []
     const out = []
-    for (const name of keys) out.push(name) // 全列（含 run_code：both 模式下真实可调）
+    for (const name of keys) out.push(name) // 全列（运行时真实可调，不按 STAGES/META 过滤）
     return [...out].sort()
   } catch { return [] }
 }
@@ -320,316 +411,6 @@ function isMutatingDev(name, args) {
   return name === 'write' || name === 'edit'
 }
 
-/** 定位 headless 浏览器（实测修复：缺 --user-data-dir 是 600s 挂起根因——profiler 互斥锁）。 */
-export function pageRunnerPath() {
-  const env = process.env.DSH_PAGE_RUNNER
-  if (env && existsSync(env)) return env
-  const pf = process.env['ProgramFiles'] || 'C:\\Program Files'
-  const pf86 = process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)'
-  for (const p of [
-    join(pf, 'Google\\Chrome\\Application\\chrome.exe'),
-    join(pf, 'Microsoft\\Edge\\Application\\msedge.exe'),
-    join(pf86, 'Google\\Chrome\\Application\\chrome.exe'),
-    join(pf86, 'Microsoft\\Edge\\Application\\msedge.exe'),
-  ]) if (existsSync(p)) return p
-  return ''
-}
-
-/** DOM 工具（v1.7 增强：dump-dom 文本上的轻量提取——剥离 style/script、title、id/class/tag 文本）。
- *  无完整 HTML parser；#id/.class/tag 提取足够可靠。 */
-export function stripDomNoise(html) {
-  let s = String(html || '')
-  s = s.replace(/<style[\s\S]*?<\/style>/gi, '\n')
-  s = s.replace(/<script[\s\S]*?<\/script>/gi, '\n')
-  return s
-}
-export function extractTitle(html) {
-  const m = String(html || '').match(/<title[^>]*>([\s\S]*?)<\/title>/i)
-  return m ? m[1].trim() : ''
-}
-export function extractSelectorText(html, selector) {
-  const s = String(selector || '').trim()
-  if (!s) return ''
-  const src = String(html || '')
-  const esc = (v) => v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  const innerOf = (startIdx, openLen, tagName) => {
-    const rest = src.slice(startIdx + openLen)
-    const closer = rest.match(new RegExp('</' + tagName + '\\s*>', 'i'))
-    const end = closer ? closer.index + closer[0].length : rest.length
-    return (rest.slice(0, end).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim()).slice(0, 4000)
-  }
-  if (s.startsWith('#')) {
-    const re = new RegExp('<[a-z0-9]+[^>]*\\bid\\s*=\\s*["\']?' + esc(s.slice(1)) + '["\'\\s>]', 'i')
-    const m = src.match(re)
-    if (!m) return ''
-    return innerOf(m.index, m[0].length, m[0].match(/<([a-z0-9]+)/i)?.[1] || 'div')
-  }
-  if (s.startsWith('.')) {
-    const re = new RegExp('<[a-z0-9]+[^>]*\\bclass\\s*=\\s*["\'][^"\']*\\b' + esc(s.slice(1)) + '\\b[^"\']*["\']', 'i')
-    const m = src.match(re)
-    if (!m) return ''
-    return innerOf(m.index, m[0].length, m[0].match(/<([a-z0-9]+)/i)?.[1] || 'div')
-  }
-  const tag = s.replace(/[^a-z0-9]/gi, '').toLowerCase()
-  if (!tag) return ''
-  const m = src.match(new RegExp('<' + esc(tag) + '[\\s>]', 'i'))
-  if (!m) return ''
-  return innerOf(m.index, m[0].length, tag)
-}
-
-/** Chrome --enable-logging=stderr 的 console/pageerror 行提取（v1.7：三/四/五轮的"拿不到 console"）。 */
-export function extractConsoleLines(stderrText) {
-  const t = String(stderrText || '')
-  const out = []
-  const seen = new Set()
-  const push = (line) => {
-    const l = line.trim().slice(0, 320)
-    if (!l || seen.has(l)) return
-    seen.add(l); out.push(l)
-  }
-  for (const m of t.matchAll(/(?:INFO|ERROR|WARNING|WARN):CONSOLE\((\d+)\):?\s*([^\r\n]*)/gi)) push('console[' + m[1] + ']: ' + m[2])
-  for (const m of t.matchAll(/(Uncaught[^\r\n]{0,240})/gi)) push(m[1])
-  for (const m of t.matchAll(/((?:TypeError|ReferenceError|SyntaxError|RangeError)[^\r\n]{0,180})/gi)) push(m[1])
-  return out.slice(0, 60).join('\n')
-}
-
-/** 本地 JS 引擎（v1.7：DSH 进程即 node——vm 隔离执行，语法检查 + 纯逻辑运行；
- *  回应"环境没有 node --check / 无法快速单测"。无 require/process/fs：纯逻辑沙箱。 */
-export function runSandboxJs(code) {
-  const src = String(code || '').trim()
-  if (!src) return { ok: true, output: '', error: '' }
-  const logs = []
-  const sandbox = {
-    console: {
-      log: (...a) => logs.push(a.map((x) => (typeof x === 'string' ? x : safeStringify(x))).join(' ')),
-      error: (...a) => logs.push('ERR ' + a.map((x) => (typeof x === 'string' ? x : safeStringify(x))).join(' ')),
-      warn: (...a) => logs.push('WARN ' + a.map((x) => (typeof x === 'string' ? x : safeStringify(x))).join(' ')),
-    },
-    JSON, Math, Date, Number, String, Boolean, Array, Object, RegExp, Map, Set,
-    parseInt, parseFloat, isNaN, isFinite, NaN, Infinity,
-  }
-  try {
-    // 顶层 return 在 vm.Script 不合法——包装成 IIFE，用户源码里 return 即返回值
-    const wrapped = '"use strict";\n(function(){\n' + src + '\n})()'
-    const script = new vm.Script(wrapped, { filename: 'sandbox.js' })
-    const value = script.runInNewContext(sandbox, { timeout: 5000 })
-    const output = logs.join('\n')
-    let tail = ''
-    if (value !== undefined) tail = (output ? '\n' : '') + '=> ' + safeStringify(value)
-    return { ok: true, output: (output + tail).slice(0, 4000), error: '' }
-  } catch (e) {
-    return { ok: false, output: logs.join('\n'), error: (e && e.message) || String(e) }
-  }
-}
-function safeStringify(v) {
-  try { return JSON.stringify(v) ?? String(v) } catch { return String(v) }
-}
-
-/** URL 归一化（v1.6：中文路径自动 file://；v1.16：相对路径的"根"= 会话工作区——AI 实测
- *  相对路径被解析到 DSH 进程 cwd（Administrator）导致 ERR_FILE_NOT_FOUND）。
- *  支持 http(s)://、file://、绝对盘符路径、相对路径（base = 调用方 session cwd）。 */
-export function normalizePageUrl(raw, baseDir) {
-  const u = String(raw || '').trim()
-  if (/^https?:\/\//i.test(u)) return u
-  if (/^[a-z][a-z0-9+.-]*:\/\//i.test(u)) return u // 其他 scheme 原样 → pageCheckRun 校验会拒绝
-  if (/^file:/i.test(u)) {
-    try { return new URL(u).href } catch { return u }
-  }
-  const abs = /^[a-zA-Z]:[\\/]/.test(u) || u.startsWith('/')
-  const root = baseDir || process.cwd()
-  try { return pathToFileURL(abs ? u : join(root, u)).href } catch { return u }
-}
-
-/** 统一失败结果（v1.6.1 修复：此前失败分支返回 {ok:false,error} 缺 schema 的字段且 error
- *  不在 additionalProperties:false 的 schema 内 → 输出校验 invalid output，工具整体不可用）。
- *  v1.7：补齐 title/consoleTail/selectorText/jsOutput/jsError（全分支同形）。 */
-export function pageFail(message) {
-  return { ok: false, exitCode: -1, timedOut: false, settleError: message, shot: '', domText: '', stderrTail: '', title: '', consoleTail: '', selectorText: '', jsOutput: '', jsError: '' }
-}
-
-/** 页面验证执行体（headless Chrome + 新鲜 profile + screenshot + DOM smoke；硬超时杀树）。
- *  ctx 只需 subprocess 服务（ctx.get('subprocess')）。返回 lossless-JSON 概览，所有分支形状统一。
- *  v1.9.1：CPU/进程安全三防（用户实弹"后台挂超多 chrome、CPU 爆掉"）——
- *   ① 单飞锁：同时只允许一个页面检查（并发只返回 busy，不再堆进程）；
- *   ② 结束/超时后强制 taskkill /F /T 树杀（subprocess 默认温和 kill 杀不死无窗口的 headless chrome，
- *      孤儿 renderer/GPU 进程会累积满载 CPU）；
- *   ③ 自动重试改为 opt-in（retry: true）——默认不重试，避免 3D 页 SwiftShader 双倍满载。 */
-const PAGE_BUSY_KEY = Symbol.for('router-standard.pageCheckBusy')
-
-export async function pageCheckRun(ctx, args) {
-  if (args?.js !== undefined && args?.js !== null && String(args.js).trim() !== '') {
-    const r = runSandboxJs(String(args.js))
-    return {
-      ok: r.ok, exitCode: r.ok ? 0 : -1, timedOut: false, settleError: '',
-      shot: '', domText: '', stderrTail: '', title: '', consoleTail: '', selectorText: '',
-      jsOutput: r.output, jsError: r.error,
-    }
-  }
-  // 单飞锁：本进程同时只跑一个页面检查（跨 preset 代共享，防多会话/并发堆积）。
-  // v1.14 诊断增强：owner/起始时间可查；超 10 分钟视为残留死锁自动接管（掉落进程再不会堵死验证路径）。
-  const busySlot = globalThis[PAGE_BUSY_KEY] ?? (globalThis[PAGE_BUSY_KEY] = { v: false, owner: '', at: 0 })
-  if (busySlot.v) {
-    if (Date.now() - busySlot.at > 10 * 60 * 1000) {
-      busySlot.v = false; busySlot.owner = ''; busySlot.at = 0
-    } else {
-      return pageFail('another page-check is running (single-flight) since ' + new Date(busySlot.at || Date.now()).toISOString()
-        + ' (owner: ' + (busySlot.owner || 'unknown') + '); check dev_router_status for the lock, retry after it settles')
-    }
-  }
-  busySlot.v = true
-  busySlot.owner = (() => { try { return currentSession()?.id || 'sess' } catch { return 'sess' } })()
-  busySlot.at = Date.now()
-  try {
-    const first = await pageCheckRunOnce(ctx, args)
-    if (first.ok) return first
-    // v1.15：自动重试默认开启（建议 #3——重页首载偶发）；重试=双倍虚拟时间 + 降分辨率（1024×640，防 CPU 双爆）。
-    // 仅"可重试型"失败才重试：硬错误带 settleError 且未超时 → 不重试（显式 retry:false 可关）。
-    if (args?.retry === false || (first.settleError && !first.timedOut)) return first
-    const boost = {
-      ...args,
-      width: Math.min(1024, Number(args?.width || 1280)),
-      height: 640,
-      scale: 1,
-      virtualTimeMs: Math.min(60000, Math.floor(Number(args?.virtualTimeMs || 8000) * 2)),
-      timeoutMs: Math.min(240000, Math.round(Number(args?.timeoutMs || 20000) * 1.5)),
-    }
-    return await pageCheckRunOnce(ctx, boost)
-  } finally {
-    busySlot.v = false
-    busySlot.owner = ''
-  }
-}
-
-/** 强制 tree-kill 兜底（v1.9.1）：taskkill /F /T 按主 pid 杀整棵 chrome 树——subprocess 的
- *  温和 kill（无 /F）对无窗口的 headless chrome 无效，这是"孤儿进程累积"的根因。fire-and-forget。 */
-function forceTreeKill(ctx, pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return
-  try {
-    const sub = ctx?.get?.('subprocess')
-    if (!sub || typeof sub.spawn !== 'function') return
-    sub.spawn({
-      argv: ['taskkill', '/F', '/T', '/PID', String(pid)],
-      cwd: process.cwd(),
-      stdio: { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' },
-      graceMs: 1000,
-    })
-  } catch { /* 兜底失败不阻塞 */ }
-}
-
-/** 单次执行体（无重试语义；参数与 pageCheckRun 相同）。 */
-async function pageCheckRunOnce(ctx, args) {
-  const chrome = pageRunnerPath()
-  if (!chrome) return pageFail('no headless browser found (Chrome/Edge); set DSH_PAGE_RUNNER')
-  const url = normalizePageUrl(args?.url, (() => { try { return ctx?.get?.('agent')?.session?.header?.cwd || process.cwd() } catch { return process.cwd() } })())
-  if (!/^(https?|file):/i.test(url)) return pageFail('url must be http(s):// / file:// / a path (auto-encoded)')
-  // v1.16 轻量单帧模式（AI 反馈 #2：重页默认资源可控——960×640 + 固定 12s 虚拟时间，
-  // 失败不二次降级；用户实测软件渲染 50s/100% CPU 的画面用 lite 可进 ~15s）
-  const lite = args?.lite === true
-  const timeoutMs = Math.min(180000, Math.max(1000, Math.floor(Number(args?.timeoutMs || (lite ? 30000 : 20000)))))
-  const width = Math.min(4096, Math.max(320, Math.floor(Number(args?.width || (lite ? 960 : 1280)))))
-  const height = Math.min(4096, Math.max(240, Math.floor(Number(args?.height || (lite ? 640 : 800)))))
-  const domChars = Math.min(30000, Math.max(500, Math.floor(Number(args?.domChars || 8000))))
-  const scale = Math.min(4, Math.max(1, Math.floor(Number(args?.scale || (lite ? 1 : 1)))))
-  const cssSel = String(args?.selector || '').trim()
-  // v1.14：截图写入"会话工作区"（模型可读）而非 DSH 进程 cwd——此前落在 Administrator 用户目录，
-  // read_image 报 not found；session.header.cwd 是模型真实工作区。
-  const sessionCwd = (() => { try { return ctx?.get?.('agent')?.session?.header?.cwd || process.cwd() } catch { return process.cwd() } })()
-  const shotRoot = join(sessionCwd, '.dsh-shots')
-  const shot = join(shotRoot, 'page-' + Date.now() + '.png')
-  const profile = join(tmpdir(), 'dsh-page-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8))
-  try { mkdirSync(profile, { recursive: true }) } catch { return pageFail('cannot create temp browser profile') }
-  try { mkdirSync(shotRoot, { recursive: true }) } catch { /* chrome 会在写截图时给出可见错误 */ }
-  const sub = ctx?.get?.('subprocess')
-  if (!sub || typeof sub.spawn !== 'function') return pageFail('no subprocess service in scope')
-  const ac = new AbortController()
-  const timer = setTimeout(() => ac.abort(), timeoutMs)
-  let outcome; let stdoutReader; let stderrReader; let settleError = ''; let childPid = -1
-  try {
-    const handle = sub.spawn({
-      argv: [
-        chrome,
-        // v1.14 WebGL 修复（实弹：--disable-gpu 与 swiftshader 组合 → 黑图 4.5KB + 拖慢到超时；
-        // 手动验证组合：去 --disable-gpu + --enable-unsafe-swiftshader --use-angle=swiftshader → 414KB 正常）
-        '--headless=new', '--no-first-run', '--no-default-browser-check',
-        '--disable-dev-shm-usage', '--user-data-dir=' + profile,
-        '--enable-logging=stderr',
-        '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--disable-application-cache',
-        '--screenshot=' + shot,
-        '--window-size=' + width + ',' + height,
-        '--force-device-scale-factor=' + String(scale),
-        '--virtual-time-budget=' + String(Math.min(30000, Math.max(500, Math.floor(Number(args?.virtualTimeMs || 8000))))),
-        '--dump-dom',
-        url,
-      ],
-      cwd: process.cwd(),
-      stdio: {
-        stdin: 'ignore',
-        stdout: { maxBytes: 12 * 1024 * 1024, spill: { maxBytes: 16 * 1024 * 1024 } },
-        stderr: { maxBytes: 1024 * 1024, spill: { maxBytes: 2 * 1024 * 1024 } },
-      },
-      graceMs: 2000,
-      signal: ac.signal,
-    })
-    childPid = handle?.pid
-    outcome = await handle.done
-    const collected = handle.collected
-    stdoutReader = collected?.stdout
-    stderrReader = collected?.stderr
-  } catch (e) {
-    settleError = (e && e.message) || String(e)
-  } finally {
-    clearTimeout(timer)
-    // v1.9.1 强制树杀兜底：subprocess 温和 kill 杀不死无窗口 chrome——无论成败都按主 pid /F /T 清理
-    forceTreeKill(ctx, childPid)
-  }
-  const timedOut = ac.signal.aborted
-  const readTail = (reader, max) => {
-    try {
-      const r = reader?.readFrom?.(0)
-      const t = (r && (r.text || '')) || ''
-      return t.length > max ? t.slice(0, max) : t
-    } catch { return '' }
-  }
-  const rawDom = readTail(stdoutReader, 8 * 1024 * 1024)
-  const domText = stripDomNoise(rawDom).slice(0, domChars)
-  const errTail = readTail(stderrReader, 600).replace(/[\r\n]+/g, ' | ').trim()
-  const consoleTail = extractConsoleLines(errTail === '' ? '' : readTail(stderrReader, 1024 * 1024))
-  const selectorText = extractSelectorText(rawDom, cssSel)
-  const exitCode = Number(outcome?.exitCode ?? outcome?.code ?? -1)
-  const ok = !settleError && !timedOut && exitCode === 0 && domText.length > 0
-  return {
-    ok, exitCode: Number.isFinite(exitCode) ? exitCode : -1, timedOut,
-    // v1.16 失败诊断（#11：失败不静默——给原因 + 候选路径）
-    settleError: settleError || (!ok ? diagnosePageFail({ timedOut, exitCode, domText, errTail, shot, lite }) : ''),
-    shot, domText, stderrTail: errTail,
-    title: extractTitle(rawDom),
-    consoleTail,
-    selectorText,
-    jsOutput: '', jsError: '',
-  }
-}
-
-/** v1.16 失败诊断文案：原因 + 下一步（不再"FAIL 无产物"——AI 反馈 #11）。 */
-function diagnosePageFail(f) {
-  const causes = []
-  if (f.timedOut) causes.push('TIMEOUT (hard kill)')
-  else if (f.exitCode === 0 && f.domText.length === 0) causes.push('exit 0 but empty DOM (page may not have loaded JS / --dump-dom raced)')
-  else causes.push('exit=' + f.exitCode)
-  if (!f.shot || !existsSync(f.shot)) causes.push('no screenshot artifact')
-  else causes.push('screenshot at ' + f.shot)
-  const stderr = String(f.errTail || '').replace(/\s+/g, ' ').slice(0, 200)
-  let advice = 'Next steps: '
-  advice += f.lite ? '' : '1) lite:true (960x640 single-frame, ~15s); '
-  advice += '2) check the path (relative resolves to the session workspace); '
-  advice += '3) external validator (python -m playwright screenshot ...) + read_image — deliver with evidence kind=external; '
-  advice += '4) timeoutMs/virtualTimeMs bigger for heavy WebGL.'
-  return causes.join('; ') + (stderr ? ' | stderr: ' + stderr : '') + ' | ' + advice
-}
-
-/** 交付 gate（v1.11——用户实弹：缺"交付 gate 工具"，模型把"功能做完"当"完成交付"）：
- *  校验交付物：存在/非空/UTF-8 编码 + 可选 headless smoke（加载/标题/console），
- *  输出 PASS/FAIL + 证据清单；均 PASS 才允许宣告完成。CHECK 永远不强制解锁任何权限，
- *  它是阶段出口契约的落地工具。 */
 export async function deliveryCheck(ctx, args) {
   const file = String(args?.file || '').trim()
   const checks = []
@@ -650,21 +431,15 @@ export async function deliveryCheck(ctx, args) {
   } catch (e) {
     checks.push({ name: 'encoding-utf8', pass: false, detail: String((e && e.message) || e) })
   }
-  // v1.14 绕过修复：页面交付物默认必须 smoke——无 url =. smoke FAIL（requireSmoke: false 才可跳过，
-  // 但页面类产物建议永远给 url；非页面产物（脚本/文档）可显式关）。
+  // v1.23（方案A·大道至简）：delivery_check 不再自跑 headless smoke（此前复用 dev_page_check/pageCheckRun，反复出bug）。
+  // 页面交付物的视觉验证交给**模型用 bash 自测**（playwright/headless Chrome 截图 + read_image 视觉确认），
+  // 并在 evidence 里给 visual proof（kind=image, reviewed:true）。delivery_check 校验 evidence 门禁，而非自已渲染。
   const requireSmoke = args?.requireSmoke !== false
-  if (args?.url) {
-    const smoke = await pageCheckRun(ctx, { ...args, url: args.url })
-    checks.push({
-      name: 'headless-smoke',
-      pass: smoke.ok,
-      detail: `title=${smoke.title || '(empty)'} dom=${smoke.domText.length} console=${smoke.consoleTail ? 'errors present' : 'clean'}${smoke.timedOut ? ' TIMED_OUT' : ''}`,
-    })
-  } else if (requireSmoke) {
-    checks.push({ name: 'headless-smoke', pass: false, detail: 'smoke required for delivery — pass url (page deliverable); set requireSmoke: false only for non-page artifacts (scripts/docs)' })
+  if (args?.url && requireSmoke) {
+    checks.push({ name: 'page-verify', pass: false, detail: 'visual verify the page with bash (headless Chrome/playwright screenshot) + read_image (reviewed:true) into evidence — delivery_check gates the evidence, not a built-in browser' })
   }
   /* 证据门禁（正式交付契约——v1.14 规范化：schema 写清进工具描述，不再让模型读源码）：
-   * evidence.items[] 每项: { label, kind ∈ file|page|image|run|test|text, target?（file/page/image/test 必填路径）,
+   * evidence.items[] 每项: { label, kind ∈ file|page|image|run|test|text|external|numeric, target?（file/page/image/test 必填路径）,
    *   result?（run/text 必填文本）, reviewed?: true（page/image 视觉类必须人工复核过）}
    * 页面交付物额外要求：至少一项 reviewed 的视觉证据。 */
   const ev = args?.evidence
@@ -674,7 +449,7 @@ export async function deliveryCheck(ctx, args) {
     // v1.16 外部验证器一等公民（AI 反馈 #9：门禁验结果不锁工具）——
     // external = 外部验证器（Playwright/playwright-cli/自产报告）产物：target（截图/报告文件）
     // 或 result（命令输出摘要）任一存在即合法；页面交付物仍需 ≥1 项 reviewed 视觉证据（page/image/external 皆可）。
-    const ALLOWED = new Set(['file', 'page', 'image', 'run', 'test', 'text', 'external'])
+    const ALLOWED = new Set(['file', 'page', 'image', 'run', 'test', 'text', 'external', 'numeric'])
     const failures = []
     for (const it of ev.items) {
       const label = String(it?.label || '').trim()
@@ -683,6 +458,13 @@ export async function deliveryCheck(ctx, args) {
       if (!ALLOWED.has(kind)) { failures.push('bad kind: ' + kind); continue }
       if (kind === 'run' || kind === 'text') {
         if (!String(it?.result || '').trim()) failures.push(kind + ' evidence without result')
+        continue
+      }
+      if (kind === 'numeric') {
+        // v1.24：数值不变量 evidence——模型自算物理/数值不变量（如黑洞光子球半径、守恒量 H/L），
+        // 门禁校验它必须带"数值结果"。这回应"自动计算物理不变量，让环境替模型完成主动怀疑"。
+        const res = String(it?.result ?? '').trim()
+        if (!res || !/^-?[\d.eE+-]+$/.test(res)) failures.push('numeric evidence needs a numeric result (e.g. minr=2.07, H=0.00)')
         continue
       }
       if (kind === 'external') {
@@ -710,6 +492,10 @@ export async function deliveryCheck(ctx, args) {
       if (!hasReviewedVisual) failures.push('page deliverable needs at least one reviewed visual evidence (page/image/external)')
     }
     checks.push({ name: 'delivery-evidence', pass: failures.length === 0, detail: failures.length === 0 ? 'evidence accepted (' + ev.items.length + ' item(s))' : failures.join('; ') })
+    // v1.28（引导，不强杀）：若交付物存在可测数值不变量（守恒量/半径/计数/编译成功），但 evidence 里没有
+    // numeric 断言——只提示"缺一个数值断言"，不强杀。这响应黑洞建议"把'我认为对'变成'我验证过'"（B 强度）。
+    const noNumeric = (ev.items || []).every(it => String(it?.kind) !== 'numeric')
+    if (noNumeric) checks.push({ name: 'numeric-assertion', pass: true, detail: 'hint: if this deliverable has a measurable invariant (conserved qty / radius / count / compile-ok), add a numeric evidence item (kind=numeric, result=<number>) to turn "I think it works" into "I verified it". Non-blocking.' })
   }
   return { ok: checks.every((c) => c.pass), checks }
 }
@@ -723,42 +509,19 @@ function deliveryCheckRender(_args, v) {
   return [{ type: 'text', text }]
 }
 
-function pageCheckRender(_args, v) {
-  const head = Number.isFinite(v.exitCode) ? v.exitCode : -1
-  let text = 'page-check: ' + (v.ok ? 'OK' : 'FAIL')
-    + ' (exit=' + head + (v.timedOut ? ', TIMED OUT' : '') + (v.settleError ? ', ' + v.settleError : '') + ')\n'
-  if (v.title) text += 'title: ' + v.title + '\n'
-  if (v.selectorText) text += 'selector: ' + v.selectorText + '\n'
-  if (v.consoleTail) text += '---- console/pageerror ----\n' + v.consoleTail + '\n'
-  text += 'screenshot: ' + (v.shot || '') + '\n'
-  if (v.stderrTail) text += 'stderr: ' + v.stderrTail + '\n'
-  if (v.jsError) text += 'js-error: ' + v.jsError + '\n'
-  if (v.jsOutput) text += '---- js output ----\n' + v.jsOutput + '\n'
-  text += '---- dom (' + String(v.domText || '').length + ' chars) ----\n' + (v.domText || '')
-  return [{ type: 'text', text }]
-}
 
-/** 自主推进（v1.6 直达语义——"用哪档工具就跳到哪档"，消除"先玩一遍路由才能干活"的摩擦）：
- *  ① 调用预放档工具 → 直接跳到该工具所在阶段（阶段 0 调 write → 2；调 pwsh → 3）；
- *  ② 文本保底：明确开发意图（写/创建/生成/build/create/implement…）→ 至少 2；
- *  ③ str_replace_editor 仅 create/str_replace/insert 算开发（view 是只读，不推进）；
- *  ④ "/计划|方案|plan/" 宽匹配仍禁用（文件名/话题会误触发——STANDARD-PLAN.md 教训）。 */
-export function autoAdvance(stage, toolCalls, text) {
+/** 完成信号驱动的阶段推进（v1.19，严格 workflow）——"完成本阶段任务"才晋级：
+ *  ① 了解/对齐（0→1）：ask_user_question（已澄清）或 todo_write/exit_plan_mode（已计划）；
+ *  ② 拟合方案（1→2）：todo_write（计划已记录）或 exit_plan_mode（计划已呈现/批准）；
+ *  ③ 开发（2→3）：delivery_check（产物自检/交付准备）。
+ *  工具名、文本意图不跨档跳级——某阶段缺少工具 = 工具分配位置问题（STAGES 归属），不是给出口。 */
+export function autoAdvance(stage, toolCalls, _text) {
   if (stage >= STAGES.length - 1) return stage
-  const tools = Array.isArray(toolCalls) ? toolCalls : []
-  const names = new Set(tools.map((t) => (typeof t === 'string' ? t : t?.name)).filter(Boolean))
-  const mutatingDev = tools.some((t) => isMutatingDev(typeof t === 'string' ? t : t?.name, t?.args))
-  let target = stage
-  for (const nm of names) {
-    const idx = STAGES.findIndex((s) => s.tools.includes(nm))
-    if (idx <= target) continue
-    // str_replace_editor：只有 mutating 命令算开发档
-    if (nm === 'str_replace_editor' && !mutatingDev) continue
-    target = idx
-  }
-  if (names.has('todo_write')) target = Math.max(target, 1)
-  if (/开始开发|进入开发|着手实现|开始实现|write the code|写一个|写一份|创建|生成|实现|构建|build|create|generate|implement|make a|new project/i.test(text)) target = Math.max(target, 2)
-  return Math.min(target, STAGES.length - 1)
+  const names = new Set((Array.isArray(toolCalls) ? toolCalls : []).map((t) => (typeof t === 'string' ? t : t?.name)).filter(Boolean))
+  if (stage === 0 && (names.has('ask_user_question') || names.has('todo_write') || names.has('exit_plan_mode'))) return 1
+  if (stage === 1 && (names.has('todo_write') || names.has('exit_plan_mode'))) return 2
+  if (stage === 2 && names.has('delivery_check')) return 3
+  return stage
 }
 
 /* 阶段状态持久化 */
@@ -779,7 +542,7 @@ function loadStageState() {
       const out = {}
       for (const [sid, st] of Object.entries(parsed.sessions)) {
         const stage = Number(st?.stage)
-        if (Number.isInteger(stage) && stage >= 0 && stage <= 3) out[sid] = { stage, guided: st?.guided === true }
+        if (Number.isInteger(stage) && stage >= 0 && stage <= 3) out[sid] = { stage, guided: st?.guided === true, ...(Number.isFinite(st?.stageAtTime) ? { stageAtTime: st.stageAtTime } : {}), ...(st?.lastAdvance && typeof st.lastAdvance === 'object' ? { lastAdvance: { at: Number.isFinite(st.lastAdvance.at) ? st.lastAdvance.at : 0, reason: st.lastAdvance.reason ?? null } } : {}) }
       }
       return out
     }
@@ -808,7 +571,7 @@ function applyStageRestrict(agent, stage) {
     if (stage >= STAGES.length - 1) return
     const toolsSvc = agent.ctx.get('tools')
     if (toolsSvc && typeof toolsSvc.restrict === 'function') {
-      const allowed = new Set(STAGES.slice(0, Math.min(stage + 3, STAGES.length)).flatMap((s) => s.tools).concat(META_ALL))
+      const allowed = new Set(STAGES.slice(0, windowFor(stage)).flatMap((s) => s.tools).concat(META_ALL))
       // v1.5：先按 GLOBAL_SAFE 过滤，再按 restrictableNames 过滤——平台性缺失（如 win32 无 bash）
       // 命名的工具会导致 restrict() 抛 unknown，从而放弃整个阶段门控；双过滤保证门控始终成立。
       let known = null
@@ -886,13 +649,14 @@ export function apply(ctx, config) {
     const sections = filterToolGuidance((assembled.sections || []).map((s) =>
       /persona/i.test(s.name) ? { ...s, text: RL_PERSONA } : s
     ), stage, fullNames)
-    sections.push({ name: 'router-stage', order: 1, text: stageText(stage, muteAwareList(runtimeCallable(toolsSvc, agent), memoryMuted(session)), memoryMuted(session)) })
-    // 声明与泄压常驻（人设常驻：不经压缩丢失；bootstrap 消息可能被 compaction 剪掉）
-    sections.push({ name: 'router-decl', order: 2, text: PROGRESSIVE_DECL })
-    sections.push({ name: 'router-proactivity', order: 3, text: PRESSURE_GUIDE.replace(/^\n+/, '') })
+    // v1.18.1 口径统一：先安装 meta shim，再基于同一注册面渲染 stageText（与 dev_router_status 同源）
     if (!shimmedSessions.has(session.id)) {
       try { installMetaShim(agent, { installStage: true, stage }); shimmedSessions.add(session.id) } catch { /* ignore */ }
     }
+    sections.push({ name: 'router-stage', order: 1, text: stageText(stage, muteAwareList(runtimeCallable(toolsSvc, agent), memoryMuted(session)), memoryMuted(session), firstUserTask(session)) })
+    // 声明与主动性常驻（人设常驻：不经压缩丢失；bootstrap 消息可能被 compaction 剪掉）
+    sections.push({ name: 'router-decl', order: 2, text: PROGRESSIVE_DECL })
+    sections.push({ name: 'router-proactivity', order: 3, text: PRESSURE_GUIDE.replace(/^\n+/, '') })
     const available = new Set(assembled.tools.map((tool) => tool.name))
     if (available.has('run_code')) {
       const staged = buildStagedSdk(sections, stage)
@@ -913,10 +677,19 @@ export function apply(ctx, config) {
     const st = (ensureStage()[sid] ??= { stage: 0, guided: false })
     const stageAt = st.stageAtTime ?? 0
     const toolCalls = (agent.session.events || []).filter((e) => (e.time === undefined || e.time >= stageAt) && (e.type === 'tool/call' || e.type === 'tool/code-dispatch')).map((e) => ({ name: e.data?.name || e.data?.toolName || '', args: toolArgs(e.data) }))
-    const nextStage = autoAdvance(st.stage, toolCalls, text)
+    // v1.17.2：被拒的锁定工具调用（如阶段 0 调 bash → unknown tool）不算行为信号——
+    // 只有当前阶段真实可调（view.visible）的工具调用才触发直达推进。
+    let advanceCalls = toolCalls
+    try {
+      const ts = agent?.ctx?.get?.('tools')
+      const vis = ts?.view?.(agent)?.visible
+      if (vis && typeof vis.has === 'function') advanceCalls = toolCalls.filter((c) => !c.name || vis.has(c.name))
+    } catch { /* 无法判定时回退旧语义：全部调用参与推进 */ }
+    const nextStage = autoAdvance(st.stage, advanceCalls, text)
     if (nextStage > st.stage) {
       st.stage = nextStage
       st.stageAtTime = Date.now()
+      st.lastAdvance = { at: Date.now(), reason: 'auto:' + advanceCalls.map((c) => c.name).filter(Boolean).join(',') }
       saveStageState()
       applyStageRestrict(agent, nextStage)
       try { installMetaShim(agent, { installStage: true }) } catch { /* ignore */ }
@@ -944,14 +717,37 @@ export function apply(ctx, config) {
 
   registerTool({
     name: 'phase_begin',
-    description: '确认开启本次会话：开始渐进式工具解锁（注入机制声明 + 解锁阶段 0 工具 + 切换 Code Mode）。调用即开始。Code Mode 契约：run_code 程序必须以 lossless JSON 结束——async 时 await 每个工具调用（Promise 直接 return 会 invalid-output）；edit 报 invalid-output 失败时先 grep 确认文件——编辑可能实际已生效（假失败），勿盲目重试。',
+    description: '确认开启本次会话：开始渐进式工具解锁（注入机制声明 + 解锁阶段 0 工具；呈现为 native 直调）。调用即开始。',
     parameters: {},
     output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: String(v) }] },
-    async execute() {
+    async execute(args) {
       const session = currentSession()
       if (session === undefined) return 'no agent session'
       const sid = session.id
       const state = ensureStage()
+      const doFresh = sessionFresh(currentAgent())
+      if (doFresh) {
+        state[sid] = { stage: 0, guided: true }
+        saveStageState()
+        applyStageRestrict(currentAgent(), 0)
+        try { installMetaShim(currentAgent(), { installStage: false, stage: 0 }) } catch { /* ignore */ }
+        try {
+          const toolsSvc = currentAgent()?.ctx?.get?.('tools')
+          if (toolsSvc && typeof toolsSvc.presentAs === 'function') toolsSvc.presentAs('native')
+        } catch { /* already declared */ }
+        const toolsSvc = currentAgent()?.ctx?.get?.('tools')
+        const runtimeList = muteAwareList(runtimeCallable(toolsSvc, currentAgent()), memoryMuted(session))
+        const guide = START_GUIDE + '\n\n' + PROGRESSIVE_DECL + '\n\n' + PRESSURE_GUIDE + '\n\n' + stageText(0, runtimeList, memoryMuted(session), firstUserTask(session))
+        try {
+          currentAgent()?.inbox.append('next-step', {
+            id: 'bootstrap-fresh-' + Date.now(),
+            role: 'user',
+            source: { kind: 'plugin', plugin: 'router-bootstrap' },
+            content: [{ type: 'text', text: guide }],
+          })
+        } catch { /* skip */ }
+        return 'session started (fresh-auto): phase 0 了解/对齐 unlocked — Bootstrap injected. New conversation detected; stage state reset.'
+      }
       const existing = state[sid] ?? { stage: 0, guided: false }
       state[sid] = existing
       if (existing.guided === true) {
@@ -972,7 +768,9 @@ export function apply(ctx, config) {
         const toolsSvc = currentAgent()?.ctx?.get('tools')
         if (toolsSvc && typeof toolsSvc.presentAs === 'function') toolsSvc.presentAs('native') // v1.15 定案：wire = restrict 过滤后的可见工具（注入面+调用面同时阶段化，SDK 段归零——39K 注意力税消失），且所有工具直接可调（无折叠）。both 的双注入态（wire 全量 + SDK 全量）已废弃
       } catch { /* already declared */ }
-      const guide = START_GUIDE + '\n\n' + PROGRESSIVE_DECL + '\n\n' + PRESSURE_GUIDE + '\n\n' + stageText(existing.stage, [], memoryMuted(session))
+      const toolsSvc = currentAgent()?.ctx?.get?.('tools')
+      const runtimeList = muteAwareList(runtimeCallable(toolsSvc, currentAgent()), memoryMuted(session))
+      const guide = START_GUIDE + '\n\n' + PROGRESSIVE_DECL + '\n\n' + PRESSURE_GUIDE + '\n\n' + stageText(existing.stage, runtimeList, memoryMuted(session), firstUserTask(session))
       try {
         currentAgent()?.inbox.append('next-step', {
           id: 'bootstrap-' + Date.now(),
@@ -1003,39 +801,48 @@ export function apply(ctx, config) {
       state[sid] = state[sid] ?? { stage: 0, guided: false }
       state[sid].stage = next
       state[sid].stageAtTime = Date.now()
+      state[sid].lastAdvance = { at: Date.now(), reason: args?.reason ? String(args.reason) : null }
       saveStageState()
       applyStageRestrict(currentAgent(), next)
       try { installMetaShim(currentAgent(), { installStage: true }) } catch { /* ignore */ }
       // 阶段变化由 system prompt stageText 与 dev_router_status 呈现（不插用户消息打断）
-      return 'advanced to phase ' + next + ': ' + STAGES[next].name + ' (tools unlocked: ' + STAGES.slice(0, next + 1).flatMap((s) => s.tools).join(', ') + ')'
+      const muted = memoryMuted(session)
+      const newTools = muteAwareList(STAGES[next].tools, muted)
+      const preTools = muteAwareList(preUnlockedFor(next), muted)
+      const card = (nm) => {
+        const found = toolIndex().find((t) => t.name === nm)
+        return nm + (found ? ' — ' + found.desc.split(/\n|\. /)[0].slice(0, 46) : '')
+      }
+      return 'advanced to phase ' + next + ': ' + STAGES[next].name
+        + '\nNew this stage: ' + newTools.map(card).join(' | ')
+        + (preTools.length ? '\nPre-unlocked (already callable): ' + preTools.map(card).join(' | ') : '')
+        + '\nNext goal: ' + STAGES[next].name + ' — complete it via its completion signal (todo_write/exit_plan_mode/delivery_check) or phase_advance.'
     },
   })
 
   registerTool({
     name: 'tools_catalog',
     description: DESC.toolsCatalog,
-    parameters: { query: { type: 'string' }, domain: { type: 'string' } },
+    parameters: { query: { type: 'string', description: '关键词（单点白盒：命中未解锁工具时只给相关行，带解锁阶段/交付期标注）' }, domain: { type: 'string', description: '域筛选' } },
     output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: String(v) }] },
     async execute(args) {
       const all = toolIndex()
       const q = String(args.query || '').toLowerCase()
       const d = String(args.domain || '').toLowerCase()
-      const dom = (n, desc) => {
-        const t = n + ' ' + desc
-        if (/(read|write|edit|glob|grep|str_replace_editor|fs|file|path)/i.test(t)) return 'file'
-        if (/(bash|pwsh|shell|run_code|exec|command|spawn)/i.test(t)) return 'exec'
-        if (/(web|search|fetch|http|network|browse)/i.test(t)) return 'network'
-        if (/(subagent|agent|delegate|workflow|ralph|fork)/i.test(t)) return 'delegate'
-        if (/(engram|memory|recall|store|search)/i.test(t)) return 'memory'
-        return 'other'
-      }
+      const dom = categorizeDomain
+      const session = currentSession()
+      const stage = session === undefined ? 0 : (ensureStage()[session.id]?.stage ?? 0)
       const rows = all.filter((t) => {
-        if (q && !(t.name + ' ' + t.desc).toLowerCase().includes(q)) return false
         if (d && dom(t.name, t.desc) !== d) return false
+        if (q && !(t.name + ' ' + t.desc).toLowerCase().includes(q)) return false
+        if (!q && t.mark === '未解锁') return false // v1.18 注意力盲区：默认不点名未解锁工具；query 命中即按需白盒
         return true
       })
       if (rows.length === 0) return '（无匹配工具）'
-      return rows.map((t) => '- ' + t.name + ' [' + t.mark + '] — ' + (t.desc.split(/\n|\. /)[0].slice(0, 90)) + ' (' + paramHint(t.parameters) + ')').join('\n')
+      return rows.map((t) => {
+        const extra = catalogMarkExtra(t.name, t.mark, stage)
+        return '- ' + t.name + ' [' + t.mark + ']' + extra + ' — ' + (t.desc.split(/\n|\. /)[0].slice(0, 90)) + ' (' + paramHint(t.parameters) + ')'
+      }).join('\n')
     },
   })
 
@@ -1051,7 +858,8 @@ export function apply(ctx, config) {
       const params = found.parameters && typeof found.parameters === 'object' && !Array.isArray(found.parameters) ? found.parameters : {}
       const props = params.properties || {}
       const required = params.required || []
-      const lines = ['工具: ' + name + ' [' + found.mark + ']', '描述: ' + found.desc]
+      const unlock = helpUnlockLine(name, found.mark)
+      const lines = ['工具: ' + name + ' [' + found.mark + ']', unlock, '描述: ' + found.desc].filter(Boolean)
       for (const [k, v] of Object.entries(props)) {
         const meta = v || {}
         lines.push('  ' + k + ': ' + (meta.type || 'any') + (required.includes(k) ? '（必需）' : '') + ' — ' + (meta.description || ''))
@@ -1076,72 +884,16 @@ export function apply(ctx, config) {
       return [
         'router=standard (progressive, ' + ROUTER_VERSION + ')',
         'phase=' + sum.name + ' (' + sum.stage + '/3)',
-        'callable=[' + runtimeCallable(agent?.ctx?.get?.('tools'), agent).join(', ') + ']', // v1.11 运行时事实（与 SDK 绑定同源）
+        'callable=[' + muteAwareList(runtimeCallable(agent?.ctx?.get?.('tools'), agent), memoryMuted(session)).join(', ') + ']', // v1.11/v1.18.3 运行时事实（与 SDK 绑定同源；与 shim 版同口径）
         'presentation=' + readPresentation(agent),
         'mode=' + fmtMode(mode) + ' (band=' + bandFor(mode) + ')',
         'persona=' + RL_PERSONA,
         'override=' + (overrideMap().has(sid) ? String(overrideMap().get(sid)) : 'auto'),
         'preset=' + (ctx.get('agentPresets')?.composedPreset?.(agent?.ctx) ?? 'unknown'),
         'goalTools=get_goal/create_goal/update_goal',
-        'pageCheckLock=' + (() => { const b = globalThis[PAGE_BUSY_KEY]; return b && b.v ? ('busy since ' + new Date(b.at).toISOString() + ' (owner ' + (b.owner || '?') + ')') : 'free' })(),
+        'lastAdvance=' + (() => { const la = (ensureStage()[sid] || {}).lastAdvance; return la && Number.isFinite(la.at) ? new Date(la.at).toISOString() + (la.reason ? ' (' + la.reason + ')' : '') : 'none' })(),
         ...(stage >= STAGES.length - 1 ? ['fullCatalog=restrict released (all tools open)'] : []),
       ].join('\n')
-    },
-  })
-
-  registerTool({
-    name: 'dev_router_mode',
-    description: 'Temporarily override the reasoning mode (spec/weak/mixed/react, 0-100, 0.0-1.0, or auto to clear).',
-    parameters: { mode: { type: 'string', required: true } },
-    output: { schema: { type: 'string' }, render: (_a, v) => [{ type: 'text', text: String(v) }] },
-    async execute(args) {
-      const parsed = parseMode(String(args.mode || '').trim())
-      if (parsed === null) return 'invalid mode "' + args.mode + '"'
-      const session = currentSession()
-      if (session === undefined) return 'no agent session'
-      if (parsed === 'auto') { overrideMap().delete(session.id); return 'auto: override cleared' }
-      overrideMap().set(session.id, parsed)
-      return 'mode set to ' + parsed + ' (band=' + bandFor(parsed) + ')'
-    },
-  })
-
-  registerTool({
-    name: 'dev_page_check',
-    description: '页面/JS 验证三合一：① url 模式 = headless Chrome 截图 + DOM smoke（console/pageerror 提取；title/selector/scale；WebGL 页已开软件渲染 --enable-unsafe-swiftshader——3D 页不再假超时；失败自动重试一次（双倍虚拟时间+全新 profile）——结果可复现）；② js 模式 = 本地 vm 执行任意 JS（语法 + 纯逻辑单测）。url 支持 http(s)://、file://、裸路径（中文自动编码）。产物 .dsh-shots/page-*.png。',
-    parameters: {
-      url: { type: 'string', description: '页面地址（js 模式时省略）' },
-      js: { type: 'string', description: 'JS 源码：语法检查 + 纯逻辑执行（不启动浏览器）' },
-      timeoutMs: { type: 'number', description: '硬超时毫秒（默认 20000，上限 180000）' },
-      width: { type: 'number', description: '视口宽（默认 1280）' },
-      height: { type: 'number', description: '视口高（默认 800）' },
-      scale: { type: 'number', description: '截图放大倍数 1-4（默认 1；细节核对用 2-3）' },
-      virtualTimeMs: { type: 'number', description: '虚拟时间预算（默认 8000；动画页可加大）' },
-      domChars: { type: 'number', description: 'DOM 片段截取字符数（默认 8000，剥离 style/script 后；上限 30000）' },
-      selector: { type: 'string', description: '#id / .class / tagname：提取该元素文本（用于绕过截断读取数值）' },
-      retry: { type: 'boolean', description: '失败自动重试一次（默认 true：降分辨率 1024×640 + 双倍虚拟时间 + 1.5×超时——吸附 3D/WebGL 首载偶发且不爆 CPU）；retry: false 关闭' },
-      lite: { type: 'boolean', description: '轻量单帧模式：960×640 + 默认 12s 虚拟时间（重页省 CPU，约 15s 内完成）；失败不二次降级' },
-    },
-    output: { schema: {
-      type: 'object',
-      additionalProperties: false,
-      properties: {
-        ok: { type: 'boolean' },
-        exitCode: { type: 'number' },
-        timedOut: { type: 'boolean' },
-        settleError: { type: 'string' },
-        shot: { type: 'string' },
-        domText: { type: 'string' },
-        stderrTail: { type: 'string' },
-        title: { type: 'string' },
-        consoleTail: { type: 'string' },
-        selectorText: { type: 'string' },
-        jsOutput: { type: 'string' },
-        jsError: { type: 'string' },
-      },
-      required: ['ok', 'exitCode', 'timedOut', 'settleError', 'shot', 'domText', 'stderrTail', 'title', 'consoleTail', 'selectorText', 'jsOutput', 'jsError'],
-    }, render: pageCheckRender },
-    async execute(args) {
-      return await pageCheckRun(ctx, args)
     },
   })
 
@@ -1155,9 +907,9 @@ export function apply(ctx, config) {
       timeoutMs: { type: 'number', description: 'smoke 硬超时毫秒（默认 20000）' },
       virtualTimeMs: { type: 'number', description: 'smoke 虚拟时间预算（默认 8000）' },
       retry: { type: 'boolean', description: 'smoke 失败时自动重试一次（默认 true，降分辨率+双倍虚拟时间）' },
-      evidence: { type: 'object', description: '通用证据清单。结构（唯一权威）：{ items: [{ label, kind ∈ file|page|image|run|test|text, target?（file/page/image/test 必填路径）, result?（run/text 必填文本）, reviewed?: true（page/image 视觉类必须人工复核过） }] }。页面交付物要求至少一项 reviewed:true 的视觉证据；为空则 delivery-evidence 判 FAIL。', properties: {
+      evidence: { type: 'object', description: '通用证据清单。结构（唯一权威）：{ items: [{ label, kind ∈ file|page|image|run|test|text|external|numeric, target?（file/page/image/test 必填路径）, result?（run/text/external 必填文本）, reviewed?: true（page/image 视觉类必须人工复核过） }] }。页面交付物要求至少一项 reviewed:true 的视觉证据；为空则 delivery-evidence 判 FAIL。', properties: {
         items: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
-          kind: { type: 'string', enum: ['file','page','image','run','test','text'] },
+          kind: { type: 'string', enum: ['file','page','image','run','test','text','external','numeric'] },
           label: { type: 'string' }, target: { type: 'string' }, result: { type: 'string' }, reviewed: { type: 'boolean' },
         }, required: ['kind', 'label'] } },
       }, required: ['items'] },
@@ -1173,7 +925,7 @@ export function apply(ctx, config) {
 
 
   /** forwarding shim：注册到 target 的**自身 scope**（own layer 不受旧 restrict 相交过滤），
-   *  让当前热重载会话立即通过 run_code 看到 meta 工具。 */
+   *  让当前热重载会话立即看到 meta 工具。 */
   function installMetaShim(agent, opts) {
     const installStage = opts?.installStage !== false
     const curStage = opts?.stage ?? (agent?.session?.id ? ensureStage()[agent.session.id]?.stage ?? 0 : 0)
@@ -1204,26 +956,27 @@ export function apply(ctx, config) {
     n += make({
       name: 'tools_catalog',
       description: DESC.toolsCatalog,
-      parameters: { query: { type: 'string' }, domain: { type: 'string' } },
+      parameters: { query: { type: 'string', description: '关键词（单点白盒：命中未解锁工具时只给相关行，带解锁阶段/交付期标注）' }, domain: { type: 'string', description: '域筛选' } },
       execute: async (args) => {
         const q = String(args?.query || '').toLowerCase()
         const d = String(args?.domain || '').toLowerCase()
-        const dom = (n, desc) => {
-          const t = n + ' ' + desc
-          if (/(read|write|edit|glob|grep|str_replace_editor|fs|file|path)/i.test(t)) return 'file'
-          if (/(bash|pwsh|shell|run_code|exec|command|spawn)/i.test(t)) return 'exec'
-          if (/(web|search|fetch|http|network|browse)/i.test(t)) return 'network'
-          if (/(subagent|agent|delegate|workflow|ralph|fork)/i.test(t)) return 'delegate'
-          if (/(engram|memory|recall|store|search)/i.test(t)) return 'memory'
-          return 'other'
-        }
+        const dom = categorizeDomain
         const rows = allSchemas().map((s) => ({
           name: s.name || s.function?.name,
           desc: (s.description || s.function?.description || ''),
           mark: runtimeMark(toolsSvc, agent, s.name || s.function?.name || ''),
           parameters: s.parameters || s.function?.parameters || {},
-        })).filter((t) => t.name).sort((a, b) => a.name.localeCompare(b.name))
-        return rows.filter((t) => (!q || (t.name + ' ' + t.desc).toLowerCase().includes(q)) && (!d || dom(t.name, t.desc) === d)).map((t) => '- ' + t.name + ' [' + t.mark + '] — ' + t.desc.split(/\n|\. /)[0].slice(0, 90) + ' (' + paramHint(t.parameters) + ')').join('\n') || '（无匹配工具）'
+        })).filter((t) => t.name).sort((a, b) => a.name.localeCompare(b.name)).filter((t) => {
+          if (d && dom(t.name, t.desc) !== d) return false
+          if (q && !(t.name + ' ' + t.desc).toLowerCase().includes(q)) return false
+          if (!q && t.mark === '未解锁') return false // v1.18 注意力盲区：默认不点名未解锁工具；query 命中即按需白盒
+          return true
+        })
+        if (rows.length === 0) return '（无匹配工具）'
+        return rows.map((t) => {
+          const extra = catalogMarkExtra(t.name, t.mark, stageOf())
+          return '- ' + t.name + ' [' + t.mark + ']' + extra + ' — ' + t.desc.split(/\n|\. /)[0].slice(0, 90) + ' (' + paramHint(t.parameters) + ')'
+        }).join('\n')
       },
     })
 
@@ -1238,7 +991,9 @@ export function apply(ctx, config) {
         const params = s.parameters || s.function?.parameters || {}
         const props = params.properties || {}
         const required = params.required || []
-        const lines = ['工具: ' + wanted + ' [' + runtimeMark(toolsSvc, agent, wanted) + ']', '描述: ' + (s.description || s.function?.description || '')]
+        const mark = runtimeMark(toolsSvc, agent, wanted)
+        const unlock = helpUnlockLine(wanted, mark)
+        const lines = ['工具: ' + wanted + ' [' + mark + ']', unlock, '描述: ' + (s.description || s.function?.description || '')].filter(Boolean)
         for (const [k, v] of Object.entries(props)) lines.push('  ' + k + ': ' + (v.type || 'any') + (required.includes(k) ? '（必需）' : '') + ' — ' + (v.description || ''))
         return lines.join('\n')
       },
@@ -1252,21 +1007,7 @@ export function apply(ctx, config) {
         const sum = stageSummary(stageOf())
         const mode = overrideMap().get(sid) ?? sessionMode(agent?.session)
         const cur = stageOf()
-        return 'router=standard (own-layer shim, ' + ROUTER_VERSION + ')\nphase=' + sum.name + ' (' + sum.stage + '/3)\ncallable(runtime)=' + muteAwareList(runtimeCallable(agent.ctx?.get?.('tools'), agent), memoryMuted(agent?.session)).join(', ') + '\npresentation=' + readPresentation(agent) + '\nmode=' + fmtMode(mode) + ' (band=' + bandFor(mode) + ')\npersona=' + RL_PERSONA + '\noverride=' + (overrideMap().has(sid) ? String(overrideMap().get(sid)) : 'auto') + '\npreset=' + (ctx.get('agentPresets')?.composedPreset?.(agent.ctx) ?? 'unknown') + '\npageCheckLock=' + (() => { const b = globalThis[PAGE_BUSY_KEY]; return b && b.v ? ('busy since ' + new Date(b.at).toISOString() + ' (owner ' + (b.owner || '?') + ')') : 'free' })() + '\ngoalTools=get_goal/create_goal/update_goal' + (cur >= STAGES.length - 1 ? '\nfullCatalog=restrict released (all tools open)' : '')
-      },
-    })
-
-    n += make({
-      name: 'dev_router_mode',
-      description: 'Temporarily override the reasoning mode (spec/weak/mixed/react, 0-100, 0.0-1.0, or auto to clear). (own-layer shim)',
-      parameters: { mode: { type: 'string', required: true } },
-      execute: async (args) => {
-        const parsed = parseMode(String(args?.mode || '').trim())
-        if (parsed === null) return 'invalid mode "' + args.mode + '"'
-        const map = overrideMap()
-        if (parsed === 'auto') { map.delete(sid); return 'auto: override cleared' }
-        map.set(sid, parsed)
-        return 'mode set to ' + parsed + ' (band=' + bandFor(parsed) + ')'
+        return 'router=standard (own-layer shim, ' + ROUTER_VERSION + ')\nphase=' + sum.name + ' (' + sum.stage + '/3)\ncallable(runtime)=' + muteAwareList(runtimeCallable(agent.ctx?.get?.('tools'), agent), memoryMuted(agent?.session)).join(', ') + '\npresentation=' + readPresentation(agent) + '\nmode=' + fmtMode(mode) + ' (band=' + bandFor(mode) + ')\npersona=' + RL_PERSONA + '\noverride=' + (overrideMap().has(sid) ? String(overrideMap().get(sid)) : 'auto') + '\npreset=' + (ctx.get('agentPresets')?.composedPreset?.(agent.ctx) ?? 'unknown') + '\ngoalTools=get_goal/create_goal/update_goal\nlastAdvance=' + (() => { const la = (ensureStage()[sid] || {}).lastAdvance; return la && Number.isFinite(la.at) ? new Date(la.at).toISOString() + (la.reason ? ' (' + la.reason + ')' : '') : 'none' })() + (cur >= STAGES.length - 1 ? '\nfullCatalog=restrict released (all tools open)' : '')
       },
     })
 
@@ -1274,45 +1015,27 @@ export function apply(ctx, config) {
       name: 'phase_advance',
       description: DESC.phaseAdvance,
       parameters: { reason: { type: 'string', description: '推进理由（可选）' } },
-      execute: async () => {
+      execute: async (args) => {
         const st = (ensureStage()[sid] ??= { stage: 0, guided: false })
         if (st.stage >= STAGES.length - 1) return 'already at the last stage (' + STAGES[st.stage].name + '); full catalog is open'
         st.stage += 1
         st.stageAtTime = Date.now()
+        st.lastAdvance = { at: Date.now(), reason: args?.reason ? String(args.reason) : null }
         saveStageState()
         applyStageRestrict(agent, st.stage)
         try { installMetaShim(agent, { installStage: true }) } catch { /* ignore */ }
-        return 'advanced to phase ' + st.stage + ': ' + STAGES[st.stage].name + ' (tools: ' + STAGES.slice(0, st.stage + 1).flatMap((s) => s.tools).join(', ') + ')'
+        const muted = memoryMuted(agent?.session)
+        const newTools = muteAwareList(STAGES[st.stage].tools, muted)
+        const preTools = muteAwareList(preUnlockedFor(st.stage), muted)
+        const card = (nm) => {
+          const found = allSchemas().find((x) => (x.name || x.function?.name) === nm)
+          return nm + (found ? ' — ' + (found.description || found.function?.description || '').split(/\n|\. /)[0].slice(0, 46) : '')
+        }
+        return 'advanced to phase ' + st.stage + ': ' + STAGES[st.stage].name
+          + '\nNew this stage: ' + newTools.map(card).join(' | ')
+          + (preTools.length ? '\nPre-unlocked (already callable): ' + preTools.map(card).join(' | ') : '')
+          + '\nNext goal: ' + STAGES[st.stage].name + ' — complete it via its completion signal (todo_write/exit_plan_mode/delivery_check) or phase_advance.'
       },
-    })
-
-    n += make({
-      name: 'dev_page_check',
-      description: '页面/JS 验证（own-layer shim）：url 模式 = 截图 + DOM smoke + console/pageerror + title + selector + scale（WebGL 软件渲染已开，失败自动重试一次）；js 模式 = 本地 vm 语法检查/纯逻辑执行。',
-      parameters: {
-        url: { type: 'string', description: 'http(s):// / file:// / 裸路径（自动编码）' },
-        js: { type: 'string', description: 'JS 源码（js 模式，不启动浏览器）' },
-        timeoutMs: { type: 'number' }, width: { type: 'number' }, height: { type: 'number' },
-        lite: { type: 'boolean', description: '轻量单帧（960×640 + 12s）' },
-        scale: { type: 'number' }, virtualTimeMs: { type: 'number' }, domChars: { type: 'number' },
-        selector: { type: 'string', description: '#id / .class / tagname 提取文本' },
-        retry: { type: 'boolean', description: '失败重试一次（默认 false）' },
-      },
-      output: {
-        schema: {
-          type: 'object',
-          additionalProperties: false,
-          properties: {
-            ok: { type: 'boolean' }, exitCode: { type: 'number' }, timedOut: { type: 'boolean' },
-            settleError: { type: 'string' }, shot: { type: 'string' }, domText: { type: 'string' }, stderrTail: { type: 'string' },
-            title: { type: 'string' }, consoleTail: { type: 'string' }, selectorText: { type: 'string' },
-            jsOutput: { type: 'string' }, jsError: { type: 'string' },
-          },
-          required: ['ok', 'exitCode', 'timedOut', 'settleError', 'shot', 'domText', 'stderrTail', 'title', 'consoleTail', 'selectorText', 'jsOutput', 'jsError'],
-        },
-        render: pageCheckRender,
-      },
-      execute: async (args) => await pageCheckRun(ctx, args),
     })
 
     n += make({
@@ -1323,9 +1046,9 @@ export function apply(ctx, config) {
         url: { type: 'string', description: '可选页面地址（自动编码）' },
         timeoutMs: { type: 'number' }, virtualTimeMs: { type: 'number' }, retry: { type: 'boolean' },
         requireSmoke: { type: 'boolean', description: '默认 true：页面产物必须 smoke（省略 url 即 FAIL，不再可绕过）' },
-        evidence: { type: 'object', description: '证据清单（结构见 tools_help）：{ items: [{ label, kind, target?, result?, reviewed? }] }——页面类要求至少一项 reviewed:true 视觉证据', properties: {
+        evidence: { type: 'object', description: '证据清单（结构见 tools_help）：{ items: [{ label, kind ∈ file|page|image|run|test|text|external|numeric, target?, result?, reviewed? }] }——页面类要求至少一项 reviewed:true 视觉证据', properties: {
           items: { type: 'array', items: { type: 'object', additionalProperties: false, properties: {
-            kind: { type: 'string', enum: ['file','page','image','run','test','text'] },
+            kind: { type: 'string', enum: ['file','page','image','run','test','text','external','numeric'] },
             label: { type: 'string' }, target: { type: 'string' }, result: { type: 'string' }, reviewed: { type: 'boolean' },
           }, required: ['kind', 'label'] } },
         }, required: ['items'] },
@@ -1453,9 +1176,9 @@ export function apply(ctx, config) {
     })
 
         // 从 scope 链收集真实 stage 工具（mount layer 的 write/edit/pwsh 等），按当前阶段解锁到 target 自身 scope
-    const STAGE_HOST = ['write', 'edit', 'str_replace_editor', 'engram_store', 'engram_link', 'pwsh', 'bash', 'read_image', 'job_list', 'job_output', 'job_kill']
-    const STAGE_2_TOOLS = ['write', 'edit', 'str_replace_editor', 'engram_store', 'engram_link']
-    const STAGE_3_TOOLS = ['pwsh', 'bash', 'read_image', 'job_list', 'job_output', 'job_kill']
+    const STAGE_3_TOOLS = [...STAGES[3].tools]
+    const STAGE_2_TOOLS = [...STAGES[2].tools]
+    const STAGE_HOST = [...STAGE_2_TOOLS, ...STAGE_3_TOOLS]
     const wanted = installStage ? [...(curStage >= 2 ? STAGE_2_TOOLS : []), ...(curStage >= 3 ? STAGE_3_TOOLS : [])] : []
     const layerSvc = toolsSvc?.layers
     const chainFn = layerSvc && typeof layerSvc.chainLayers === 'function' ? layerSvc.chainLayers.bind(layerSvc) : void 0

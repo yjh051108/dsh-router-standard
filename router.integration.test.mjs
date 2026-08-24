@@ -21,8 +21,8 @@ import test from 'node:test'
 import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { apply as applyStandard } from './preset/router-standard/router-bootstrap.mjs'
-import { apply as applySpec } from './preset/router-spec/router-bootstrap-v1.mjs'
+import { apply as applyStandard } from './preset/router-standard/router-bootstrap-v34.mjs' // v1.18.3：测试面=运行面（agent.cordis.yml 挂载 -v34）
+import { apply as applySpec } from './preset/router-spec/router-bootstrap-v10.mjs' // v1.18.3: 测试面=运行面（agent.cordis.yml 挂载 -v10）
 import { classifyTask, sessionMode } from './preset/router-standard/router-core.mjs'
 
 // ── minimal Cordis-shaped context ──────────────────────────────────────────
@@ -150,7 +150,8 @@ test('phase_begin injects the bootstrap guide exactly once and persists guided (
   assert.equal(appends.length, 1, 'no duplicate bootstrap guide')
   const disk = JSON.parse(readFileSync(process.env.DSH_ROUTER_STAGE_FILE, 'utf8'))
   assert.equal(disk.sessions[session.id].guided, true)
-  assert.ok(restrictCalls.length >= 1 && restrictCalls[0].allow.includes('todo_write'), 'stage 0 pre-unlocks planning tier')
+  assert.ok(restrictCalls.length >= 1 && restrictCalls[0].allow.includes('read'), 'stage 0 allows stage-0 tools')
+  assert.ok(!restrictCalls[0].allow.includes('todo_write'), 'v1.20: no pre-unlock — planning tier not exposed at stage 0')
 })
 
 test('plugin-origin claimed messages never pin the band or receive guides', async () => {
@@ -184,11 +185,163 @@ test('standard preset: after the first tool/call the router keeps the full surfa
   const assembled = await h.assemble(baseAssembled(), { agent, scope: agent })
   assert.equal(assembled.sections.length, SECTIONS.length + 3, 'official sections + router-stage/decl/pressure (v1.3)')
   assert.ok(assembled.sections.some((s) => s.name === 'router-stage'), 'stage state stays visible after promotion')
+  const stageTextSec = assembled.sections.find((s) => s.name === 'router-stage')
+  assert.ok(/Core: /.test(stageTextSec.text), 'stage text splits Core')
+  assert.ok(!/Pre-unlocked \(already callable\): /.test(stageTextSec.text), 'v1.20: no pre-unlock group in stage text')
+  assert.match(stageTextSec.text, /Task: 从零开发一个马里奥网页游戏/, 'stage text echoes the real user task (guiding, not gating)')
   assert.ok(assembled.sections.some((s) => s.name === 'router-decl'), 'progressive declaration persists after promotion')
   assert.ok(assembled.sections.some((s) => s.name === 'router-proactivity'), 'pressure guide persists after promotion')
   assert.deepEqual(assembled.contexts, [])
   assert.ok(assembled.tools.length === TOOLS.length, 'full tool catalog exposed')
   assert.match(assembled.sections.find((s) => s.name === 'persona').text, /^You are a helpful software engineer assistant\.$/)
+})
+
+test('v1.18: catalog default = current tier only; query/all whitebox; help marks unlock stage', async () => {
+  process.env.DSH_ROUTER_STAGE_FILE = tmpStageFile()
+  const h = makeHarness(applyStandard, {})
+  const session = makeSession([
+    { type: 'user/message', data: userMessage('m100', '诊断') },
+    { type: 'tool/call', data: {} },
+  ])
+  const agent = { session, options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } }
+  h.agentRef.current = agent
+  const assembled = await h.assemble(baseAssembled(), { agent, scope: agent })
+  assert.ok(assembled, 'assembly runs')
+  const defs = [
+    { name: 'read', description: 'Read a UTF-8 text file.', parameters: { file_path: { type: 'string' } } },
+    { name: 'write', description: 'Create or fully replace a text file.', parameters: { file_path: { type: 'string' }, content: { type: 'string' } } },
+    { name: 'bash', description: 'Execute a bash command.', parameters: { command: { type: 'string' } } },
+    { name: 'dev_build_plugin', description: 'Build a plugin via bash scripts.', parameters: {} },
+  ]
+  h.ctx.tools.view = () => ({ knownNames: ['read', 'write', 'bash', 'dev_build_plugin'], visible: new Map([['read', {}]]), restrictableNames: ['read', 'write', 'bash', 'dev_build_plugin'] })
+  h.ctx.tools.schemas = () => defs
+  const cat = h.registeredTools.find((t) => t.name === 'tools_catalog')
+  const help = h.registeredTools.find((t) => t.name === 'tools_help')
+  assert.ok(!JSON.stringify(cat.parameters).includes('"all"'), 'no all:true escape hatch (strict workflow)')
+  const plain = await cat.execute({})
+  assert.ok(plain.includes('read') && !plain.includes('write'), 'v1.20: default catalog shows only current stage tools (no pre-unlock)')
+  assert.ok(!plain.match(/write \[可调\]（预放）/), 'v1.20: no pre-unlock marker — write not exposed at stage 0')
+  assert.ok(!plain.includes('bash'), 'default catalog must not name locked tools (attention blind zone)')
+  const q = await cat.execute({ query: 'bash' })
+  assert.match(q, /bash \[未解锁\]/)
+  assert.match(q, /解锁于阶段 3/)
+  const q2 = await cat.execute({ query: 'dev_build_plugin' })
+  assert.match(q2, /dev_build_plugin \[未解锁\]（宿主·交付期：阶段 3 全量开放）/, 'host tool gets deliver-stage annotation via query whitebox')
+  const hb = await help.execute({ name: 'bash' })
+  assert.match(hb, /解锁阶段: 3/)
+  const hh = await help.execute({ name: 'dev_build_plugin' })
+  assert.match(hh, /解锁阶段: 交付期/)
+})
+
+test('v1.18.2: stage 1 default catalog marks pwsh/bash as 预放', async () => {
+  process.env.DSH_ROUTER_STAGE_FILE = tmpStageFile()
+  const h = makeHarness(applyStandard, {})
+  const session = makeSession([
+    { type: 'user/message', data: userMessage('m101', 'diagnose') },
+    { type: 'tool/call', data: {} },
+  ])
+  writeFileSync(process.env.DSH_ROUTER_STAGE_FILE, JSON.stringify({ version: 2, savedAt: new Date().toISOString(), sessions: { [session.id]: { stage: 1, guided: true } } }))
+  const agent = { session, options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' } }
+  h.agentRef.current = agent
+  await h.assemble(baseAssembled(), { agent, scope: agent })
+  const defs = [
+    { name: 'read', description: 'Read.', parameters: {} },
+    { name: 'pwsh', description: 'Execute PowerShell.', parameters: {} },
+    { name: 'bash', description: 'Execute bash.', parameters: {} },
+    { name: 'workflow', description: 'Run workflow.', parameters: {} },
+  ]
+  h.ctx.tools.view = () => ({ knownNames: ['read', 'pwsh', 'bash', 'workflow'], visible: new Map([['read', {}], ['pwsh', {}], ['bash', {}]]), restrictableNames: ['read', 'pwsh', 'bash', 'workflow'] })
+  h.ctx.tools.schemas = () => defs
+  const cat = h.registeredTools.find((t) => t.name === 'tools_catalog')
+  const plain = await cat.execute({})
+  assert.ok(!plain.includes('（预放）'), 'v1.20: no pre-unlock markers anywhere in the catalog')
+  assert.ok(plain.includes('bash'), 'bash appears in catalog (host/verification tier) as 未解锁, not 预放')
+  assert.ok(!plain.match(/bash \[可调\]（预放）/), 'bash not marked pre-unlocked')
+  assert.ok(!plain.includes('workflow'), 'stage-3 host tool still hidden at stage 1')
+})
+
+test('v1.18.1: phase_advance groups New this stage vs Pre-unlocked', async () => {
+  process.env.DSH_ROUTER_STAGE_FILE = tmpStageFile()
+  const h = makeHarness(applyStandard, {})
+  const session = makeSession()
+  const agent = { session, options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' }, ctx: { get() { return undefined } } }
+  h.agentRef.current = agent
+  await h.assemble(baseAssembled(), { agent, scope: agent })
+  const adv = h.registeredTools.find((t) => t.name === 'phase_advance')
+  const out = String(await adv.execute({}))
+  assert.match(out, /advanced to phase 1/)
+  assert.match(out, /New this stage: todo_write/)
+  assert.match(out, /New this stage:.*engram_open/)
+  assert.ok(!out.includes('Pre-unlocked'), 'v1.20: no pre-unlock group in the advance card')
+  assert.match(out, /Next goal: 拟合方案/, 'advance card states the next goal')
+  assert.ok(out.includes('\n'), 'card content on its own line')
+})
+
+test('v1.18.3: delivery_check registered schema accepts evidence kind external', async () => {
+  process.env.DSH_ROUTER_STAGE_FILE = tmpStageFile()
+  const h = makeHarness(applyStandard, {})
+  const dc = h.registeredTools.find((t) => t.name === 'delivery_check')
+  assert.ok(dc, 'delivery_check registered')
+  assert.ok(JSON.stringify(dc.parameters).includes('"external"'), 'schema enum includes external (外部验证器一等公民)')
+})
+
+test('v1.18.3: memoryMuted phase_advance card filters engram tools', async () => {
+  process.env.DSH_ROUTER_STAGE_FILE = tmpStageFile()
+  const h = makeHarness(applyStandard, {})
+  const session = makeSession([{ type: 'user/message', data: userMessage('m102', '不用记忆，继续诊断') }])
+  const agent = { session, options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' }, ctx: { get() { return undefined } } }
+  h.agentRef.current = agent
+  await h.assemble(baseAssembled(), { agent, scope: agent })
+  const adv = h.registeredTools.find((t) => t.name === 'phase_advance')
+  const out = String(await adv.execute({}))
+  assert.ok(!out.includes('engram_'), 'muted card must not announce engram tools')
+  assert.match(out, /New this stage:.*todo_write/)
+})
+
+test('v1.18.4: phase_advance reason persists lastAdvance; status shows it', async () => {
+  const file = tmpStageFile()
+  process.env.DSH_ROUTER_STAGE_FILE = file
+  const h = makeHarness(applyStandard, {})
+  const session = makeSession()
+  writeFileSync(file, JSON.stringify({ version: 2, savedAt: new Date().toISOString(), sessions: { [session.id]: { stage: 0, guided: false } } }))
+  const agent = { session, options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' }, ctx: { get() { return undefined } } }
+  h.agentRef.current = agent
+  await h.assemble(baseAssembled(), { agent, scope: agent })
+  const adv = h.registeredTools.find((t) => t.name === 'phase_advance')
+  const out = String(await adv.execute({ reason: 'understanding settled' }))
+  assert.match(out, /advanced to phase 1/)
+  const disk = JSON.parse(readFileSync(file, 'utf8'))
+  assert.equal(disk.sessions[session.id].lastAdvance.reason, 'understanding settled', 'lastAdvance persisted')
+  const status = h.registeredTools.find((t) => t.name === 'dev_router_status')
+  assert.match(String(await status.execute({})), /lastAdvance=.*understanding settled/)
+})
+
+test('v1.18.4: loadStageState restores lastAdvance/stageAtTime from disk', async () => {
+  const file = tmpStageFile()
+  process.env.DSH_ROUTER_STAGE_FILE = file
+  const h = makeHarness(applyStandard, {})
+  const session = makeSession()
+  writeFileSync(file, JSON.stringify({ version: 2, savedAt: new Date().toISOString(), sessions: { [session.id]: { stage: 1, guided: true, stageAtTime: 123456, lastAdvance: { at: 123456, reason: 'prior' } } } }))
+  const agent = { session, options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' }, ctx: { get() { return undefined } } }
+  h.agentRef.current = agent
+  await h.assemble(baseAssembled(), { agent, scope: agent })
+  const status = h.registeredTools.find((t) => t.name === 'dev_router_status')
+  const out = String(await status.execute({}))
+  assert.match(out, /\(1\/3\)/, 'resumed phase 1 from disk')
+  assert.match(out, /lastAdvance=.*prior/, 'lastAdvance restored from disk')
+})
+
+test('v1.18: new conversation (request/header initial) auto-resets legacy stage to 0', async () => {
+  process.env.DSH_ROUTER_STAGE_FILE = tmpStageFile()
+  const h = makeHarness(applyStandard, {})
+  const session = makeSession([{ type: 'request/header', data: { reason: 'initial' } }])
+  writeFileSync(process.env.DSH_ROUTER_STAGE_FILE, JSON.stringify({ version: 2, savedAt: new Date().toISOString(), sessions: { [session.id]: { stage: 3, guided: false } } }))
+  const agent = { session, options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' }, inbox: { append(_k, m) {} }, ctx: { get(name) { return name === 'tools' ? { restrict() {} } : undefined } } }
+  h.agentRef.current = agent
+  await h.assemble(baseAssembled(), { agent, scope: agent })
+  const begin = h.registeredTools.find((t) => t.name === 'phase_begin')
+  const out = String(await begin.execute({}))
+  assert.match(out, /session started \(fresh-auto\): phase 0/)
 })
 
 test('spec preset (routerMode: standard): RL first turn, then full assembly returns (#44)', async () => {
@@ -256,7 +409,7 @@ test('router visibility tools are registered', () => {
   assert.ok(names.includes('tools_catalog'))
   assert.ok(names.includes('tools_help'))
   assert.ok(names.includes('dev_router_status'))
-  assert.ok(names.includes('dev_router_mode'))
+  assert.ok(!names.includes('dev_router_mode'), 'v1.20: dev_router_mode retired (no preset-internal routing)')
 })
 
 // ── v0.9 self-routed phases ─────────────────────────────────────────────────
@@ -277,7 +430,7 @@ function makeStageAgent(session, appends) {
   }
 }
 
-test('v0.9: read-only next-tier tool does not advance the phase; mutating does', async () => {
+test('v1.19: completion signals drive the phase ladder; tool names do not', async () => {
   const file = tmpStageFile()
   process.env.DSH_ROUTER_STAGE_FILE = file
   const h = makeHarness(applyStandard, {})
@@ -285,21 +438,26 @@ test('v0.9: read-only next-tier tool does not advance the phase; mutating does',
   const appends = []
   const agent = makeStageAgent(session, appends)
   h.agentRef.current = agent
-  // stage 0 → 1 via todo_write
+  // todo_write → planning
   session.events.push({ type: 'tool/call', data: { name: 'todo_write', arguments: '{}' }, time: Date.now() })
   await h.preStep({ agent, messages: [userMessage('v1', '先看计划')], turn: 1, step: 1 })
   let disk = JSON.parse(readFileSync(file, 'utf8'))
-  assert.equal(disk.sessions[session.id].stage, 1, 'todo_write advances to planning')
-  // str_replace_editor view 是读操作：不推进
-  session.events.push({ type: 'tool/call', data: { name: 'str_replace_editor', arguments: JSON.stringify({ command: 'view', path: 'README.md' }) }, time: Date.now() })
-  await h.preStep({ agent, messages: [userMessage('v2', '读文件')], turn: 2, step: 1 })
-  disk = JSON.parse(readFileSync(file, 'utf8'))
-  assert.equal(disk.sessions[session.id].stage, 1, 'view must not advance to development')
-  // mutating str_replace 推进到开发
+  assert.equal(disk.sessions[session.id].stage, 1, 'todo_write completes alignment → planning')
+  // 工具名（哪怕下一档开发工具）不再跳级
   session.events.push({ type: 'tool/call', data: { name: 'str_replace_editor', arguments: JSON.stringify({ command: 'create', path: 'x.txt', file_text: 'x' }) }, time: Date.now() })
-  await h.preStep({ agent, messages: [userMessage('v3', '开始写')], turn: 3, step: 1 })
+  await h.preStep({ agent, messages: [userMessage('v2', '开始写')], turn: 2, step: 1 })
   disk = JSON.parse(readFileSync(file, 'utf8'))
-  assert.equal(disk.sessions[session.id].stage, 2, 'mutating editor advances to development')
+  assert.equal(disk.sessions[session.id].stage, 1, 'using a dev tool does not skip planning')
+  // 计划锁定（todo_write again）→ development
+  session.events.push({ type: 'tool/call', data: { name: 'todo_write', arguments: JSON.stringify({ todos: [] }) }, time: Date.now() })
+  await h.preStep({ agent, messages: [userMessage('v3', '计划锁定')], turn: 3, step: 1 })
+  disk = JSON.parse(readFileSync(file, 'utf8'))
+  assert.equal(disk.sessions[session.id].stage, 2, 'locked plan completes planning → development')
+  // delivery_check → verification
+  session.events.push({ type: 'tool/call', data: { name: 'delivery_check' }, time: Date.now() })
+  await h.preStep({ agent, messages: [userMessage('v4', '交付')], turn: 4, step: 1 })
+  disk = JSON.parse(readFileSync(file, 'utf8'))
+  assert.equal(disk.sessions[session.id].stage, 3, 'delivery intent completes development → verification')
 })
 
 test('v1.17.1: legacy stage>0 + guided:false — phase_begin repairs flag, no duplicate phase-0 bootstrap', async () => {
@@ -337,7 +495,7 @@ test('v0.9: resume keeps the phase and never re-injects the bootstrap guide', as
   assert.match(assembled.sections.find((s) => s.name === 'router-stage').text, /开发 \(2\/3\)/)
 })
 
-test('v0.9: using a next-tier tool advances the phase and persists it', async () => {
+test('v1.19: completion signal persists phase to disk', async () => {
   const file = tmpStageFile()
   process.env.DSH_ROUTER_STAGE_FILE = file
   const h = makeHarness(applyStandard, {})
@@ -352,48 +510,6 @@ test('v0.9: using a next-tier tool advances the phase and persists it', async ()
   assert.equal(disk.sessions[session.id].stage, 1, 'phase persisted to disk')
   const assembled = await h.assemble(baseAssembled(), { agent, scope: agent })
   assert.match(assembled.sections.find((s) => s.name === 'router-stage').text, /拟合方案 \(1\/3\)/)
-})
-
-test('v1.6.1: shim dev_page_check output contract — object schema + render + full-shape result (regression: value must be a string)', async () => {
-  process.env.DSH_ROUTER_STAGE_FILE = tmpStageFile()
-  const h = makeHarness(applyStandard, {})
-  const session = makeSession()
-  const appends = []
-  const shimTools = []
-  const agent = {
-    session,
-    options: { provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-    inbox: { append(_k, m) { appends.push(m) } },
-    ctx: {
-      get(name) {
-        if (name === 'tools') return {
-          restrict() {}, register(def) { shimTools.push(def) }, schemas() { return [] },
-        }
-        return undefined
-      },
-    },
-  }
-  h.agentRef.current = agent
-  await h.assemble(baseAssembled(), { agent, scope: agent })
-  const begin = h.registeredTools.find((t) => t.name === 'phase_begin')
-  assert.ok(begin, 'phase_begin registered')
-  await begin.execute()
-  const def = shimTools.find((d) => d.name === 'dev_page_check')
-  assert.ok(def, 'shim dev_page_check registered through installMetaShim')
-  assert.ok(def.output && def.output.schema && def.output.schema.type === 'object', 'shim output schema must be the object schema (v1.6.1)')
-  assert.equal(typeof def.output.render, 'function', 'shim output render must be present')
-  const v = await def.execute({ url: 'http://127.0.0.1:9/unreachable', timeoutMs: 1000 })
-  // harness ctx 无 subprocess → pageFail 分支：12 字段形状完整（v1.6.1→v1.7 内容）
-  for (const k of Object.keys(v)) {
-    assert.ok(['ok', 'exitCode', 'timedOut', 'settleError', 'shot', 'domText', 'stderrTail', 'title', 'consoleTail', 'selectorText', 'jsOutput', 'jsError'].includes(k), 'unexpected key: ' + k)
-  }
-  assert.equal(v.ok, false)
-  assert.match(v.settleError, /subprocess/)
-  assert.equal(typeof v.exitCode, 'number')
-  // js-only 模式经 shim 路径也可用（不启动浏览器）
-  const jsv = await def.execute({ js: 'return Math.max(1, 7, 3)' })
-  assert.equal(jsv.ok, true)
-  assert.match(jsv.jsOutput, /=> 7/)
 })
 
 test('v1.6.1: shim zero-arg tools keep string output (catalog/status unchanged)', async () => {
@@ -435,8 +551,8 @@ test('v1.6: restrict pre-unlocks two tiers (stage 0 → write available; verific
   await begin.execute()
   const first = agent._restrictCalls[0]
   assert.ok(first, 'restrict called on phase_begin')
-  assert.ok(first.allow.includes('todo_write'), 'planning tier pre-unlocked at stage 0')
-  assert.ok(first.allow.includes('write'), 'development tier pre-unlocked at stage 0 (two tiers, v1.6)')
+  assert.ok(first.allow.includes('read'), 'stage-0 tool allowed at stage 0')
+  assert.ok(!first.allow.includes('write'), 'v1.20: development tier NOT pre-unlocked at stage 0 (zero pre-unlock)')
   assert.ok(!first.allow.includes('pwsh'), 'verification tier stays locked at stage 0')
 })
 

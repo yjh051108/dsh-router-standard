@@ -8,7 +8,7 @@ import {
   classifyTask, personaFor, coreFor, bandFor, testinessFor, parseMode, applyPersona,
   isFlashModel, extractText, sessionMode,
 } from './preset/router-standard/router-core.mjs'
-import { autoAdvance, filterToolGuidance, markerFor, runtimeMark, runtimeCallable, deliveryCheck, paramHint, pageCheckRun, pageRunnerPath, normalizePageUrl, pageFail, runSandboxJs, stripDomNoise, extractTitle, extractSelectorText, extractConsoleLines, isMemoryTool, muteAwareList } from './preset/router-standard/router-bootstrap.mjs'
+import { autoAdvance, filterToolGuidance, markerFor, runtimeMark, runtimeCallable, deliveryCheck, paramHint, isMemoryTool, muteAwareList, firstUserTask } from './preset/router-standard/router-bootstrap-v34.mjs' // v1.18.3：测试面=运行面（agent.cordis.yml 挂载 -v34）
 
 test('react: greenfield/build tasks map to react band', () => {
   assert.equal(bandFor(classifyTask('需要本地开发一个马里奥网页小游戏，参考经典原版')), 'react')
@@ -151,19 +151,31 @@ test('applyPersona tolerates missing sections', () => {
   assert.deepEqual(out, [{ name: 'router-persona', text: 'p', order: 0 }])
 })
 
-test('autoAdvance: no false advance from "plan" in filenames or read-only editor views', () => {
+test('autoAdvance v1.19: no advance from plan filenames / read-only editors / tool names / text intent', () => {
   assert.equal(autoAdvance(0, [], 'STANDARD-PLAN.md 是美好期待'), 0)
   assert.equal(autoAdvance(1, [{ name: 'str_replace_editor', args: { command: 'view', path: 'README.md' } }], ''), 1)
-  assert.equal(autoAdvance(1, [{ name: 'str_replace_editor', args: { command: 'str_replace', path: 'a.txt', old_str: 'x', new_str: 'y' } }], ''), 2)
+  assert.equal(autoAdvance(1, [{ name: 'str_replace_editor', args: { command: 'str_replace', path: 'a.txt', old_str: 'x', new_str: 'y' } }], ''), 1, 'mutating editor use is not a completion signal')
+  assert.equal(autoAdvance(0, [{ name: 'write', args: { file_path: 'x', content: 'y' } }], ''), 0, 'using a pre-unlocked dev tool does not skip alignment')
+  assert.equal(autoAdvance(1, [{ name: 'pwsh', args: { command: 'x' } }], ''), 1, 'pre-unlocked verification tool does not skip planning')
+  assert.equal(autoAdvance(0, [], '写一个 HTML 页面'), 0, 'text intent does not skip phases')
+  assert.equal(autoAdvance(3, [{ name: 'read_image', args: { file_path: 'x.png' } }], ''), 3)
 })
 
-test('autoAdvance: v1.6 直达语义 — 用哪档工具就跳到哪档；开发意图文本直达', () => {
-  assert.equal(autoAdvance(0, [{ name: 'write', args: { file_path: 'x', content: 'y' } }], ''), 2)
-  assert.equal(autoAdvance(1, [{ name: 'pwsh', args: { command: 'x' } }], ''), 3)
-  assert.equal(autoAdvance(0, [{ name: 'todo_write', args: {} }], ''), 1)
-  assert.equal(autoAdvance(0, [], '写一个 HTML 页面'), 2)
-  assert.equal(autoAdvance(0, [{ name: 'str_replace_editor', args: { command: 'view', path: 'README.md' } }], '写一个 HTML'), 2, 'text intent still jumps even when the only tool was read-only')
-  assert.equal(autoAdvance(3, [{ name: 'read_image', args: { file_path: 'x.png' } }], ''), 3)
+test('autoAdvance v1.19: completion signals drive the phase ladder', () => {
+  assert.equal(autoAdvance(0, [{ name: 'ask_user_question' }], ''), 1, 'asking user completes alignment')
+  assert.equal(autoAdvance(0, [{ name: 'todo_write' }], ''), 1, 'recording a plan completes alignment')
+  assert.equal(autoAdvance(0, [{ name: 'exit_plan_mode' }], ''), 1, 'presenting a plan completes alignment')
+  assert.equal(autoAdvance(1, [{ name: 'todo_write' }], ''), 2, 'locked plan completes planning')
+  assert.equal(autoAdvance(1, [{ name: 'exit_plan_mode' }], ''), 2, 'presented plan completes planning')
+  assert.equal(autoAdvance(2, [{ name: 'delivery_check' }], ''), 3, 'delivery intent completes development')
+  assert.equal(autoAdvance(0, [{ name: 'delivery_check' }], ''), 0, 'no signal skips stages')
+})
+
+test('v1.19.1: firstUserTask echoes the first real user message (guiding, not gating)', () => {
+  const mk = (src, text) => ({ id: 'a', role: 'user', source: src, content: [{ type: 'text', text }] })
+  assert.equal(firstUserTask({ events: [{ type: 'user/message', data: mk({ kind: 'user' }, '做一个马里奥游戏') }] }), '做一个马里奥游戏')
+  assert.equal(firstUserTask({ events: [{ type: 'user/message', data: mk({ kind: 'plugin', plugin: 'x' }, 'approval') }] }), '', 'plugin-origin messages are not the task')
+  assert.equal(firstUserTask({ events: [{ type: 'user/message', data: mk({ kind: 'user' }, 'x'.repeat(200)) }] }).length, 161, 'truncates to 160 + ellipsis')
 })
 
 test('filterToolGuidance: keeps only visible-tier tool guidance before delivery (v1.6 pre-unlock 2 tiers)', () => {
@@ -175,9 +187,9 @@ test('filterToolGuidance: keeps only visible-tier tool guidance before delivery 
     { name: 'tools:sdk', order: 150, text: 'sdk' },
   ]
   const full = new Set(['read', 'write', 'subagent'])
-  // stage 0: read 当前档 + write（预放两档）→ 都保留；subagent 无阶段→锁定→裁
+  // stage 0: read 当前档；write 不预解锁（v1.20 预解锁归零）→ 裁掉；subagent 无阶段→锁定→裁
   const out0 = filterToolGuidance(sections, 0, full)
-  assert.deepEqual(out0.map((s) => s.name), ['tool:read', 'tool:write', 'plan-mode', 'tools:sdk'])
+  assert.deepEqual(out0.map((s) => s.name), ['tool:read', 'plan-mode', 'tools:sdk'])
   // subagent 仍裁
   assert.ok(!filterToolGuidance(sections, 1, full).some((s) => s.name === 'tool:subagent'))
   // delivery：不裁剪
@@ -195,39 +207,15 @@ test('runtimeMark: 以运行时可见面为准（v1.9 根修——目录标注=S
   assert.equal(runtimeMark(fakeVisible(['tools_catalog']), {}, 'tools_catalog'), 'meta')
   assert.equal(runtimeMark(fakeVisible([]), {}, 'tools_catalog'), '未解锁')
 })
-test('markerFor: 可调/交付后/meta/全量 semantics (v1.7 单语义化——预放≠不可调)', () => {
+test('markerFor: 可调/交付后/meta/全量 semantics (v1.20 预解锁归零)', () => {
   assert.equal(markerFor('read', 0), '可调')
-  assert.equal(markerFor('todo_write', 0), '可调')
-  assert.equal(markerFor('write', 0), '可调') // stage+2 预放 = 可调（无行为差 → 单标记）
+  assert.equal(markerFor('todo_write', 0), '未解锁') // v1.20：无预放 → 阶段1 工具在 0 不可调
+  assert.equal(markerFor('write', 0), '未解锁') // v1.20：write 不再预放（stage+1 窗口）
   assert.equal(markerFor('tools_catalog', 0), 'meta')
   assert.equal(markerFor('subagent', 0), '未解锁')
   assert.equal(markerFor('read', 3), '全量')
 })
 
-test('runSandboxJs: 语法检查 + 纯逻辑执行（v1.7 本地 JS 引擎，零外部 node）', () => {
-  const ok = runSandboxJs('const a = [1,2,3].map(x => x*2); console.log("sum", a.reduce((p,c)=>p+c,0)); return a.length')
-  assert.equal(ok.ok, true)
-  assert.match(ok.output, /sum 12/)
-  const err = runSandboxJs('const = 3')
-  assert.equal(err.ok, false)
-  assert.match(err.error, /SyntaxError|Unexpected token/)
-  const runtime = runSandboxJs('return nope()')
-  assert.equal(runtime.ok, false)
-  assert.match(runtime.error, /is not a function|ReferenceError|not defined|is not defined/)
-})
-
-test('dom 工具：strip/title/selector/console（v1.7）', () => {
-  const html = '<html><head><title>G-SHOT-READY</title><style>body{color:red}</style></head><body><div id="metrics">sai 0.10 rad</div><div class="val">-8.21</div><script>var x=1</script></body></html>'
-  assert.ok(!stripDomNoise(html).includes('color:red'))
-  assert.ok(!stripDomNoise(html).includes('var x=1'))
-  assert.equal(extractTitle(html), 'G-SHOT-READY')
-  assert.match(extractSelectorText(html, '#metrics'), /sai 0\.10 rad/)
-  assert.match(extractSelectorText(html, '.val'), /-8\.21/)
-  const stderr = 'INFO:CONSOLE(12): "hello"\nERROR:CONSOLE(13): Uncaught TypeError: setLineDash\nUncaught ReferenceError: foo'
-  const lines = extractConsoleLines(stderr)
-  assert.match(lines, /console\[12\]: "hello"/)
-  assert.match(lines, /Uncaught/)
-})
 
 test('paramHint: 参数名+类型速览消灭猜参数摩擦 (v1.4 → v1.5 带类型)', () => {
   assert.equal(paramHint({ type: 'object', properties: { pattern: { type: 'string' }, path: { type: 'string' } } }), 'params: pattern: string, path: string')
@@ -236,101 +224,6 @@ test('paramHint: 参数名+类型速览消灭猜参数摩擦 (v1.4 → v1.5 带�
   assert.equal(paramHint({ type: 'object', properties: { limit: { type: 'number', description: 'Maximum lines. Defaults to 2000.' } } }), 'params: limit: number≤2000')
   assert.match(paramHint(() => ({})), /tools_help/)
   assert.equal(paramHint(undefined), 'no params')
-})
-
-test('normalizePageUrl: 裸路径/中文路径/相对路径自动转 file:// (v1.6)', () => {
-  assert.match(normalizePageUrl('D:\\黑洞\\index.html'), /^file:\/\/\/D:\/%E9%BB%91%E6%B4%9E\/index\.html$/)
-  assert.match(normalizePageUrl('D:/黑洞/index.html'), /file:\/\/\/D:/)
-  assert.match(normalizePageUrl('index.html'), /file:\/\//)
-  assert.equal(normalizePageUrl('http://127.0.0.1:8080/?shot=probe'), 'http://127.0.0.1:8080/?shot=probe')
-  assert.equal(normalizePageUrl('ftp://x'), 'ftp://x') // 非 http/file scheme 原样 → pageCheckRun 拒绝
-})
-
-test('pageCheckRun: 单飞锁（v1.9.1——并发只跑一个，杜绝 chrome 堆积）', async () => {
-  const KEY = Symbol.for('router-standard.pageCheckBusy')
-  const saved = globalThis[KEY]
-  globalThis[KEY] = { v: true }
-  try {
-    const busy = await pageCheckRun({ get: () => ({ spawn() { throw new Error('must not spawn when busy') } }) }, { url: 'http://127.0.0.1:9/' })
-    assert.equal(busy.ok, false)
-    assert.match(busy.settleError, /single-flight/)
-  } finally {
-    if (saved === undefined) delete globalThis[KEY]
-    else globalThis[KEY] = saved
-  }
-})
-test('pageCheckRun: URL 校验 + fake subprocess smoke (v1.5 → v1.6.1 全分支形状)', async () => {
-  // 输出契约形状断言（自写子集校验器，镜像 dsh-tools 的 output 校验：7 字段必需、类型、无额外属性）
-  const assertPageShape = (v) => {
-    assert.equal(typeof v, 'object')
-    const allowed = new Set(['ok', 'exitCode', 'timedOut', 'settleError', 'shot', 'domText', 'stderrTail', 'title', 'consoleTail', 'selectorText', 'jsOutput', 'jsError'])
-    for (const k of Object.keys(v)) assert.ok(allowed.has(k), 'unexpected key: ' + k)
-    assert.equal(typeof v.ok, 'boolean')
-    assert.equal(typeof v.exitCode, 'number')
-    assert.equal(typeof v.timedOut, 'boolean')
-    assert.equal(typeof v.settleError, 'string')
-    assert.equal(typeof v.shot, 'string')
-    assert.equal(typeof v.domText, 'string')
-    assert.equal(typeof v.stderrTail, 'string')
-    assert.equal(typeof v.title, 'string')
-    assert.equal(typeof v.consoleTail, 'string')
-    assert.equal(typeof v.selectorText, 'string')
-    assert.equal(typeof v.jsOutput, 'string')
-    assert.equal(typeof v.jsError, 'string')
-  }
-  // 失败分支（url 非法）
-  const badUrl = await pageCheckRun({ get: () => undefined }, { url: 'ftp://x' })
-  assert.equal(badUrl.ok, false)
-  assertPageShape(badUrl)
-  // 失败分支（无 subprocess 服务）
-  const noSub = await pageCheckRun({ get: (n) => n === 'agent' ? {} : undefined }, { url: 'http://127.0.0.1:9/', timeoutMs: 1000 })
-  assert.equal(noSub.ok, false)
-  assert.match(noSub.settleError, /subprocess/)
-  assertPageShape(noSub)
-  // 失败分支（无法创建 temp profile：TMP 指向一个真实文件 → mkdir 必失败）
-  const savedTmp = process.env.TMP
-  try {
-    process.env.TMP = fileURLToPath(import.meta.url)
-    const noProfile = await pageCheckRun({ get: () => undefined }, { url: 'http://127.0.0.1:9/', timeoutMs: 1000 })
-    assert.equal(noProfile.ok, false)
-    assertPageShape(noProfile)
-  } finally { process.env.TMP = savedTmp }
-  // pageFail 直接构造
-  assertPageShape(pageFail('boom'))
-  // js-only 模式：不启动浏览器（v1.7）
-  const jsr = await pageCheckRun({ get: () => { throw new Error('must not touch subprocess in js mode') } }, { js: 'return 6*9' })
-  assert.equal(jsr.ok, true)
-  assert.equal(jsr.exitCode, 0)
-  assert.match(jsr.jsOutput, /=> 54/)
-  assert.equal(jsr.jsError, '')
-  const jsBad = await pageCheckRun({ get: () => { throw new Error('must not touch subprocess') } }, { js: 'const = 1' })
-  assert.equal(jsBad.ok, false)
-  assert.match(jsBad.jsError, /SyntaxError|Unexpected token/)
-  assertPageShape(jsBad)
-  // 成功路径（fake subprocess）
-  const fake = {
-    get(n) {
-      if (n !== 'subprocess') return undefined
-      return {
-        spawn(spec) {
-          return {
-            done: Promise.resolve({ exitCode: 0 }),
-            collected: {
-              stdout: { readFrom: () => ({ text: '<!doctype html><html><body>GARGANTUA OK</body></html>' }) },
-              stderr: { readFrom: () => ({ text: '' }) },
-            },
-            spec,
-          }
-        },
-      }
-    },
-  }
-  const r = await pageCheckRun(fake, { url: 'file:///x.html', domChars: 100 })
-  assert.equal(r.ok, true)
-  assert.match(r.domText, /GARGANTUA OK/)
-  assert.match(r.shot, /\.dsh-shots/)
-  assertPageShape(r)
-  assert.equal(typeof pageRunnerPath(), 'string')
 })
 test('deliveryCheck: 交付 gate 检查清单（v1.11 → v1.14 requireSmoke+evidence）', async () => {
   // 缺失路径 → FAIL + 证据
@@ -343,7 +236,7 @@ test('deliveryCheck: 交付 gate 检查清单（v1.11 → v1.14 requireSmoke+evi
   try {
     const noSmoke = await deliveryCheck({ get: () => undefined }, { file: tmp })
     assert.equal(noSmoke.ok, false)
-    assert.ok(noSmoke.checks.some((c) => c.name === 'headless-smoke' && !c.pass), 'smoke required default')
+    assert.ok(noSmoke.checks.some((c) => c.name === 'page-verify' && !c.pass || (c.name === 'delivery-evidence' && !c.pass)), 'page verify required (v1.23: model self-tests via bash, gate on evidence)')
     assert.ok(noSmoke.checks.some((c) => c.name === 'delivery-evidence' && !c.pass), 'evidence required')
     // 非页面产物显式关 smoke + 给 evidence → PASS
     const okr = await deliveryCheck({ get: () => undefined }, {
